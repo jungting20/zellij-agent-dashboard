@@ -2,7 +2,50 @@
 
 별도 에이전트 관리 데몬 없이 Zellij 플러그인으로 에이전트 상태를 확인하고 pane을 조작하는 프로젝트다. `/Users/in05908_mac/zellij-with-codeagent`의 `agent-dashboard`를 먼저 이관하며, `/Users/in05908_mac/study/zj-agent-mob`의 훅과 상태 파일 구조를 참고한다.
 
-현재는 프로젝트와 구현 계획을 초기화한 상태다. 실행 가능한 플러그인과 훅 설치 프로그램은 다음 단계에서 만든다.
+첫 조회 버전을 구현했다. Rust 상태 코어, 유한한 호스트 보조 명령, 백그라운드 수집기, 대시보드 화면과 Claude 훅 설정 생성기를 포함한다. 기존 대시보드의 모든 기능을 이관한 상태는 아니다.
+
+## 실행
+
+Zellij `0.45.0`, rustup의 Rust `1.88.0`과 `wasm32-wasip1` 타깃이 필요하다. 현재 호스트 어댑터의 실행 검증 환경은 macOS다.
+
+```sh
+rustup toolchain install 1.88.0 --profile minimal --component rustfmt,clippy
+rustup target add wasm32-wasip1 --toolchain 1.88.0
+./scripts/build.sh
+./scripts/dashboard.sh SESSION_NAME
+```
+
+클라이언트가 연결된 실행 중인 세션을 지정한다. Zellij 안에서는 세션 이름을 생략할 수 있다. 처음 로드할 때 표시되는 플러그인 권한을 승인하면 수집을 시작한다. 수집기는 화면 pane을 닫아도 남는다. 스크립트는 지정한 세션에만 수집기와 화면을 로드하며 사용자 Zellij 설정을 수정하지 않는다.
+
+Claude의 상세 상태는 훅을 연결해야 한다. 별도 설정 파일을 생성해 Zellij pane 안의 Claude 실행에 적용한다.
+
+```sh
+mkdir -p .local
+./dist/dashboard-host hook-config > .local/claude-dashboard.json
+claude --settings "$PWD/.local/claude-dashboard.json"
+```
+
+훅 생성과 로드는 자동으로 전역 Claude 설정을 수정하지 않는다. `ZAD_STATE_DIR`로 다른 저장 위치를 사용하면 생성기에도 같은 절대 경로를 전달한다.
+
+```sh
+export ZAD_STATE_DIR="$PWD/.local/state"
+./dist/dashboard-host --state-dir "$ZAD_STATE_DIR" hook-config > .local/claude-dashboard.json
+./scripts/dashboard.sh SESSION_NAME
+```
+
+화면 키는 `j/k`, 방향키, 숫자 `1–9` 선택, `/` 검색, `R` 새로고침, `Enter` pane 이동, `q` 닫기다. `Tab`은 저장된 고정 항목만 필터링한다. 고정 변경과 별칭 편집은 다음 구현 단계다.
+
+Claude, Codex, Cursor CLI(`agent`), Gemini 프로필(`agy`), Hermes 실행 파일을 발견한다. 상세 훅 어댑터는 현재 Claude만 제공한다. 다른 도구는 `found`로 표시하며 Pi 탐지는 아직 추가하지 않았다. 훅 없는 경로 정보는 프로세스가 상속한 `PWD`를 사용한다.
+
+## 검증
+
+```sh
+./scripts/check.sh
+python3 scripts/smoke.py
+python3 scripts/smoke.py --real-claude
+```
+
+smoke 검증은 이름이 무작위인 전용 임시 세션만 만들고 종료한다. `--real-claude`는 격리한 설정으로 Claude를 실행하고 모델 요청 없이 SessionStart 훅을 확인한다. 테스트용 `codex` 실행 파일은 프로세스 발견용 fixture다. 상세 범위와 결과는 [실행 검증 기록](docs/runtime-validation.md)에 기록한다.
 
 ## 첫 구현 범위
 
@@ -23,12 +66,10 @@
 
 ## 기술 방향
 
-Rust와 `zellij-tile`로 WASI 실행 파일을 만든다. 하나의 플러그인 바이너리가 설정에 따라 `collector`와 `dashboard` 역할로 실행되는 구조를 우선 검증한다. Zellij는 `load_plugins`를 통한 백그라운드 로딩을 지원한다. [Zellij 플러그인 로딩 문서](https://zellij.dev/documentation/plugin-loading)
+Rust와 Zellij `0.45.0`에 맞춘 `zellij-tile`로 WASI 실행 파일을 만든다. 하나의 플러그인 바이너리가 설정에 따라 `collector`와 `dashboard` 역할로 실행된다.
 
-Zellij 서버가 수집기의 실행 기반이다. 화면 pane을 닫아도 수집기가 남는 동작은 첫 기술 검증에서 확인한다. 모든 Zellij 세션이 종료되면 수집도 중단되고, 다음 실행에서 저장 상태와 실제 프로세스를 대조해 복원한다.
+Zellij 서버가 수집기의 실행 기반이다. 수집기는 2초마다 유한한 호스트 명령을 실행하고 공유 JSON 저장소를 갱신한다. 여러 수집기의 쓰기는 호스트 파일 잠금으로 직렬화하고 프로세스 스캔은 공유 주기로 제한한다. 모든 수집기 세션이 종료되면 수집도 중단되고, 다음 실행에서 저장 상태와 실제 프로세스를 대조해 복원한다.
 
 프로세스 탐지와 파일 갱신에 호스트 프로그램이 필요하면 요청 하나를 처리하고 종료하는 보조 명령을 사용한다. 기존 `agentd` 또는 `zellij-agent daemon serve`에 연결하지 않는다.
 
-## 개발 시작점
-
-[구현 계획의 M0](docs/implementation-plan.md#m0-zellij-실행-조건-검증)부터 진행한다. 현지 확인 환경은 Zellij `0.45.0`과 Rust `1.88.0`이다. 현재 `wasm32-wasip1` 타깃은 설치되어 있지 않아 WASM 빌드 단계에서 추가해야 한다. `zellij-tile` 버전과 최소 지원 Zellij 버전은 M0 결과로 확정한다.
+다음 구현은 [계획](docs/implementation-plan.md)에 남겨 둔 그룹·계층 표시, 고정과 별칭 저장, 입력·종료·실행 조작이다.

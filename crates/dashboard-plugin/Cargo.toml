@@ -1,0 +1,13 @@
+[package]
+name = "dashboard-plugin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dashboard-core.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+zellij-tile = "=0.45.0"
+zellij-utils = { version = "=0.45.0", default-features = false }
