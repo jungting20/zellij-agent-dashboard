@@ -423,12 +423,32 @@ fn main() {
             return [line.split() for line in call(session, "action", "list-clients").splitlines()
                     if re.match(r"^\d+\s+", line)]
         source_clients = len(attached(first))
-        focus_ui = call(first, "plugin", "--configuration", f"mode=dashboard,{base_config}", "--", f"file:{wasm}").strip()
+        focus_ui = call(first, "plugin", "--floating", "--configuration", f"mode=dashboard,{base_config}", "--", f"file:{wasm}").strip()
         wait_for("focus dashboard loaded", lambda: any(p["revision"] is not None for p in ping(first, "dashboard")))
         # Drive one attached client; each client has its own dashboard view.
         os.write(clients[0].fd, f"/{sessions[1]}\r".encode())
         wait_for("keyboard search selects requested agent", lambda: any(p["selected_id"] == target["identity"]["agent_id"]
                  and p["query"] == sessions[1] for p in ping(first, "dashboard")))
+        # gg must open the selected remote agent's repository over this dashboard.
+        def lazygit_panes(session):
+            return [p for p in json.loads(call(session, "action", "list-panes", "--all", "--json"))
+                    if not p["is_plugin"] and p["title"] == "lazygit"]
+        target_pane = next(p for p in json.loads(call(sessions[1], "action", "list-panes", "--all", "--json"))
+                           if not p["is_plugin"] and p["id"] == target["identity"]["pane_id"])
+        os.write(clients[0].fd, b"gg")
+        git_pane = wait_for("gg opens lazygit in dashboard session", lambda: next(iter(lazygit_panes(first)), None))
+        assert git_pane["is_floating"], git_pane
+        assert not lazygit_panes(sessions[1])
+        git_result = next(r for r in host_call("requests") if r["request"]["action"]["kind"] == "lazygit")
+        assert git_result["state"] == "succeeded", git_result
+        assert git_result["request"]["action"]["session"] == first
+        assert git_result["request"]["action"]["target"] == target["identity"]
+        assert Path(git_pane["pane_cwd"]).resolve() == Path(target_pane["pane_cwd"]).resolve(), git_pane
+        assert host_call("action", json.dumps(git_result["request"]))["pane_id"] == git_result["pane_id"]
+        assert len(lazygit_panes(first)) == 1
+        call(first, "action", "write-chars", "--pane-id", f'terminal_{git_pane["id"]}', "q")
+        wait_for("quitting lazygit closes floating pane", lambda: not lazygit_panes(first))
+        wait_for("lazygit request completes in dashboard", lambda: any(p["menu"] is None for p in ping(first, "dashboard")))
         host_call("pin", target["identity"]["agent_id"], "true")
         wait_for("selected agent moves to pinned rows", lambda: any(
             a["pinned"] and a["identity"]["agent_id"] == target["identity"]["agent_id"]

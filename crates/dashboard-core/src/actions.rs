@@ -34,6 +34,8 @@ pub enum Action {
     },
     Lazygit {
         target: Identity,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
     },
     Editor {
         target: Identity,
@@ -59,7 +61,7 @@ impl Action {
             Self::Input { target, .. }
             | Self::Close { target }
             | Self::Alias { target, .. }
-            | Self::Lazygit { target }
+            | Self::Lazygit { target, .. }
             | Self::Editor { target, .. } => Some(target),
         }
     }
@@ -180,6 +182,45 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_lazygit_request_keeps_payload_and_duplicate_claim() {
+        let payload = serde_json::json!({
+            "request_id": "legacy-lazygit",
+            "action": {
+                "kind": "lazygit",
+                "target": {
+                    "agent_id": "agent", "session_name": "remote", "session_epoch": "epoch",
+                    "pane_id": 7, "incarnation_id": "run", "pid": 20, "process_started": "start"
+                }
+            }
+        });
+        let request: ActionRequest = serde_json::from_value(payload.clone()).unwrap();
+        assert!(matches!(
+            &request.action,
+            Action::Lazygit { session: None, .. }
+        ));
+        assert_eq!(serde_json::to_value(&request).unwrap(), payload);
+        // A saved result must still compare equal when an old client retries.
+        let mut store = Store::default();
+        store.data.requests.insert(
+            request.request_id.clone(),
+            ActionResult {
+                request: request.clone(),
+                state: RequestState::Succeeded,
+                at_ms: 1,
+                message: String::new(),
+                pane_id: Some(8),
+                path: String::new(),
+            },
+        );
+        assert!(!store.claim(&request, 2).unwrap());
+        let mut changed = request;
+        if let Action::Lazygit { session, .. } = &mut changed.action {
+            *session = Some("dashboard".into());
+        }
+        assert!(store.claim(&changed, 3).is_err());
+    }
+
     #[test]
     fn pending_claim_survives_restart_and_payload_collision_is_rejected() {
         let mut store = Store::default();

@@ -163,3 +163,9 @@ Zellij 0.45.0에서 `python3 scripts/smoke.py`를 통과했다. 결과는 `.loca
 하단 활동 영역을 제거하고 고정/일반 목록 제목 옆 괄호 안에 현재 검색 결과에 속한 최신 상태 변화 한 건을 표시한다. 내용은 제목의 남은 너비에 맞춰 생략하며 별도 행을 차지하지 않는다. 상태 파일 구조는 변경하지 않았다.
 
 Rust 포맷 검사, 코어 테스트 29개와 WASM release 빌드를 통과했다. 임시 세션에서 대시보드 로딩·검색까지 확인했지만 plugin pane의 화면 조회를 이용한 제목 표시 검사는 시간 초과됐다. 전체 smoke 통과나 실제 표시 확인 성공으로 기록하지 않는다. 로그는 `.local/smoke-inline-activity.log`, 진단은 `.local/smoke-73e8805a72`다. 임시 세션과 프로세스는 정리했으며 운영 세션에 reload는 적용하지 않았다.
+
+## 대시보드 세션에서 lazygit 실행
+
+`gg` 요청에 대시보드 세션을 담아 선택한 에이전트의 현재 cwd로 그 세션에 새 floating lazygit pane을 연다. 기존 요청의 선택적 세션 기본값과 중복 비교 호환성을 검증했다. `./scripts/check.sh`에서 코어 30개·호스트 50개 테스트, 포맷·네이티브/WASI Clippy·스크립트 구문 검사를 통과했다. 수동 성능 테스트 1개는 제외했다. `./scripts/build.sh`로 release host와 wasm32-wasip1 플러그인을 빌드했다.
+
+`python3 scripts/smoke.py` 전체 검증을 임시 세션 두 개에서 통과했다. 결과는 `.local/smoke-2055c25588/result.json`이다. floating 대시보드에서 다른 세션의 에이전트를 선택하고 실제 `gg` 입력으로 대시보드 세션의 floating pane 생성·대상 pane의 현재 cwd 사용·요청 재전송 시 중복 생성 방지·`q` 종료와 대시보드 조작 재개를 확인했다. 기존 멀티 클라이언트·세션 이동·detach·reload·SQLite 검사도 통과했다. 초기 실행의 오래된 cwd 비교와 불필요한 Esc 입력을 고쳤으며, 중단한 실행과 권한 승인 시간 초과 실행은 통과 기록에 포함하지 않았다. 임시 세션과 프로세스는 정리했고 운영 세션에 설치·reload는 적용하지 않았다.

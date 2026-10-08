@@ -386,11 +386,11 @@ fn execute(
                 deps,
             )
         }
-        Action::Lazygit { target } => {
+        Action::Lazygit { target, session } => {
             let agent = checked(target, deps)?;
             let exe = executable("lazygit")?;
             let pane = pane_number(&deps.terminal.new_pane(
-                &SessionId(target.session_name.clone()),
+                &SessionId(session.as_ref().unwrap_or(&target.session_name).clone()),
                 &NewPane {
                     cwd: agent.cwd.into(),
                     title: "lazygit".into(),

@@ -328,7 +328,14 @@ impl Dashboard {
                     Some("children") => self.children_menu(false),
                     Some("lazygit") => {
                         if let Some(target) = target {
-                            self.submit(Action::Lazygit { target });
+                            if self.view.source_session.is_empty() {
+                                menu.error = "대시보드의 Zellij 세션을 확인할 수 없습니다".into();
+                                return;
+                            }
+                            self.submit(Action::Lazygit {
+                                target,
+                                session: Some(self.view.source_session.clone()),
+                            });
                         }
                     }
                     _ => {}
