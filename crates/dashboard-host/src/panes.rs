@@ -1,28 +1,15 @@
-use crate::{command, process};
+use crate::{
+    host::{pane_id, HostDependencies},
+    process,
+    terminal::{SessionId, TerminalPane},
+};
 use dashboard_core::{Agent, Liveness, PaneInfo, PaneOutput, Store};
-use serde::Deserialize;
 use std::{
     collections::BTreeSet,
-    process::Command,
     time::{Duration, Instant},
 };
 
-#[derive(Deserialize)]
-struct Pane {
-    id: u32,
-    is_plugin: bool,
-    #[serde(default)]
-    tab_id: Option<u32>,
-    #[serde(default)]
-    tab_name: String,
-    #[serde(default)]
-    title: String,
-    #[serde(default)]
-    pane_cwd: Option<String>,
-}
-
-fn apply_metadata(store: &mut Store, session: &str, bytes: &[u8]) -> Result<(), String> {
-    let panes: Vec<Pane> = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+fn apply_metadata(store: &mut Store, session: &str, panes: &[TerminalPane]) {
     for agent in store
         .agents
         .values_mut()
@@ -30,7 +17,7 @@ fn apply_metadata(store: &mut Store, session: &str, bytes: &[u8]) -> Result<(), 
     {
         if let Some(pane) = panes
             .iter()
-            .find(|p| !p.is_plugin && p.id == agent.identity.pane_id)
+            .find(|p| p.id == pane_id(agent.identity.pane_id))
         {
             agent.pane = PaneInfo {
                 tab_id: pane.tab_id,
@@ -38,16 +25,15 @@ fn apply_metadata(store: &mut Store, session: &str, bytes: &[u8]) -> Result<(), 
                 title: pane.title.clone(),
             };
             if agent.last_report_ms.is_none() {
-                if let Some(cwd) = pane.pane_cwd.as_ref().filter(|s| !s.is_empty()) {
+                if let Some(cwd) = pane.cwd.as_ref().filter(|s| !s.is_empty()) {
                     agent.cwd.clone_from(cwd);
                 }
             }
         }
     }
-    Ok(())
 }
 
-pub fn refresh_metadata(store: &mut Store) {
+pub fn refresh_metadata(store: &mut Store, deps: &HostDependencies) {
     let sessions: BTreeSet<_> = store
         .agents
         .values()
@@ -60,54 +46,38 @@ pub fn refresh_metadata(store: &mut Store) {
         if remaining < Duration::from_millis(20) {
             break;
         }
-        let result = command::output(
-            Command::new("zellij").args([
-                "--session",
-                &session,
-                "action",
-                "list-panes",
-                "--all",
-                "--json",
-            ]),
+        let result = deps.terminal.list_panes(
+            &SessionId(session.clone()),
+            true,
             remaining.min(Duration::from_millis(250)),
-            1024 * 1024,
         );
         // Missing/older session servers must not invalidate a successful ps scan.
-        if let Ok(bytes) = result {
-            let _ = apply_metadata(store, &session, &bytes);
+        if let Ok(panes) = result {
+            apply_metadata(store, &session, &panes);
         }
     }
 }
 
-pub fn preview(agent: &Agent) -> Result<PaneOutput, String> {
+pub fn preview(agent: &Agent, deps: &HostDependencies) -> Result<PaneOutput, String> {
     if agent.ended {
         return Err("agent session ended".into());
     }
     let present = |inventory: process::Inventory| {
         inventory.found.iter().any(|p| p.identity == agent.identity)
     };
-    if !present(process::inventory()?) {
+    if !present(process::inventory(deps.runner)?) {
         return Err("agent process changed or exited".into());
     }
-    let pane = format!("terminal_{}", agent.identity.pane_id);
-    let bytes = command::output(
-        Command::new("zellij").args([
-            "--session",
-            &agent.identity.session_name,
-            "action",
-            "dump-screen",
-            "--pane-id",
-            &pane,
-        ]),
-        Duration::from_millis(500),
-        64 * 1024,
+    let text = deps.terminal.screen(
+        &SessionId(agent.identity.session_name.clone()),
+        &pane_id(agent.identity.pane_id),
     )?;
-    if !present(process::inventory()?) {
+    if !present(process::inventory(deps.runner)?) {
         return Err("agent changed while reading output".into());
     }
     Ok(PaneOutput {
         agent_id: agent.identity.agent_id.clone(),
-        text: String::from_utf8_lossy(&bytes).into_owned(),
+        text,
     })
 }
 
@@ -135,15 +105,20 @@ mod tests {
             }],
             1000,
         );
-        let bytes = br#"[{"id":3,"is_plugin":true,"tab_id":9,"tab_name":"wrong"},{"id":3,"is_plugin":false,"tab_id":2,"tab_name":"Development","pane_cwd":"/actual"}]"#;
-        apply_metadata(&mut store, "한글 세션", bytes).unwrap();
+        let panes = vec![TerminalPane {
+            id: pane_id(3),
+            tab_id: Some(2),
+            tab_name: "Development".into(),
+            title: String::new(),
+            cwd: Some("/actual".into()),
+        }];
+        apply_metadata(&mut store, "한글 세션", &panes);
         assert_eq!(store.agents["a"].pane.tab_id, Some(2));
         assert_eq!(store.agents["a"].cwd, "/actual");
         store.agents.get_mut("a").unwrap().last_report_ms = Some(1000);
         store.agents.get_mut("a").unwrap().cwd = "/hook".into();
-        apply_metadata(&mut store, "한글 세션", bytes).unwrap();
+        apply_metadata(&mut store, "한글 세션", &panes);
         assert_eq!(store.agents["a"].cwd, "/hook");
-        assert!(apply_metadata(&mut store, "한글 세션", b"invalid").is_err());
         assert_eq!(store.agents["a"].pane.tab_id, Some(2));
     }
 }

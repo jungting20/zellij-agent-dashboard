@@ -1,5 +1,6 @@
+use crate::command::{CommandRunner, CommandSpec};
 use dashboard_core::{FoundProcess, Identity};
-use std::{collections::BTreeMap, path::Path, process::Command};
+use std::{collections::BTreeMap, path::Path};
 
 #[derive(Clone, Debug)]
 pub struct Process {
@@ -210,21 +211,23 @@ pub fn is_ancestor(processes: &[Process], ancestor: u32, mut child: u32) -> bool
     false
 }
 
-pub fn inventory() -> Result<Inventory, String> {
-    let output = Command::new("ps")
-        .args(["axeww", "-o", "pid=,ppid=,lstart=,command="])
-        // Darwin ps escapes non-ASCII argv/environment bytes in the C locale.
-        // Keep timestamps English while preserving Korean session names.
-        .env_remove("LC_ALL")
-        .env("LC_TIME", "C")
-        .env("LC_CTYPE", "en_US.UTF-8")
-        .output()
+pub fn inventory(runner: &dyn CommandRunner) -> Result<Inventory, String> {
+    let mut spec = CommandSpec::new("ps", None, 64 * 1024 * 1024).args([
+        "axeww",
+        "-o",
+        "pid=,ppid=,lstart=,command=",
+    ]);
+    // Keep timestamps English while preserving Korean argv/environment bytes.
+    spec.env = vec![
+        ("LC_ALL".into(), None),
+        ("LC_TIME".into(), Some("C".into())),
+        ("LC_CTYPE".into(), Some("en_US.UTF-8".into())),
+    ];
+    let output = runner
+        .run(&spec)
         .map_err(|e| format!("process inventory: {e}"))?;
-    if !output.status.success() {
+    if !output.success {
         return Err("process inventory failed; previous state retained".into());
-    }
-    if output.stdout.len() > 64 * 1024 * 1024 {
-        return Err("process inventory exceeds limit".into());
     }
     let parsed = parse_inventory(&String::from_utf8_lossy(&output.stdout))?;
     if !parsed.processes.iter().any(|p| p.pid == std::process::id()) {

@@ -47,7 +47,7 @@ impl TextInput {
     pub fn left(&mut self) {
         self.cursor = self.text[..self.cursor]
             .grapheme_indices(true)
-            .last()
+            .next_back()
             .map_or(0, |(i, _)| i);
     }
     pub fn right(&mut self) {

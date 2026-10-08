@@ -1,24 +1,31 @@
 mod actions;
 mod command;
 mod hooks;
+mod host;
 mod panes;
 mod process;
 mod storage;
+mod terminal;
+mod zellij;
 
 use dashboard_core::{AgentEvent, ApplyResult, Liveness, SCHEMA_VERSION};
 use std::{
     env,
     io::{self, Read},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    time::{Duration, Instant},
 };
 use storage::{now_ms, LockedStore};
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     let is_hook = args.iter().any(|s| s == "hook");
-    if let Err(error) = run(args) {
+    let runner = command::SystemCommandRunner;
+    let terminal = zellij::ZellijCli::new("zellij", &runner);
+    let dependencies = host::HostDependencies {
+        terminal: &terminal,
+        runner: &runner,
+    };
+    if let Err(error) = run(args, &dependencies) {
         eprintln!("agent-dashboard: {error}");
         // Observability hooks must never change the agent's own outcome.
         if !is_hook {
@@ -55,7 +62,7 @@ fn default_dir() -> Result<PathBuf, String> {
         .join(".local/state/zellij-agent-dashboard"))
 }
 
-fn run(mut args: Vec<String>) -> Result<(), String> {
+fn run(mut args: Vec<String>, deps: &host::HostDependencies) -> Result<(), String> {
     let mut dir = default_dir()?;
     if args.first().map(String::as_str) == Some("--state-dir") {
         if args.len() < 3 {
@@ -73,11 +80,11 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
             records.truncate(50);
             json(&records)
         }
-        "catalog" => json(&actions::catalog(&dir)?),
+        "catalog" => json(&actions::catalog(&dir, deps)?),
         "action" => {
             let request = serde_json::from_str(args.get(1).ok_or("action requires JSON request")?)
                 .map_err(|e| e.to_string())?;
-            json(&actions::action(&dir, request)?)
+            json(&actions::action(&dir, request, deps)?)
         }
         "result" => json(&actions::result(
             &dir,
@@ -86,6 +93,7 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
         "edited" => json(&actions::edited(
             &dir,
             args.get(1).ok_or("edited requires request ID")?,
+            deps,
         )?),
         "help" | "--help" => {
             println!("dashboard-host [--state-dir /path] <scan|snapshot|resolve ID|pin ID true/false|preview ID|hook --tool claude|hook-config>");
@@ -101,17 +109,17 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
             {
                 return Err("only the verified Claude hook adapter is currently supported".into());
             }
-            hook(&dir)
+            hook(&dir, deps)
         }
         "scan" => {
             let mut locked = LockedStore::open(&dir)?;
             let at = now_ms();
             // All collector replicas share the same serialization and scan budget.
             if at.saturating_sub(locked.store.last_scan_ms) >= 1800 {
-                let inventory = process::inventory()?;
+                let inventory = process::inventory(deps.runner)?;
                 locked.store.reconcile(&inventory.found, at);
                 actions::link_launches(&mut locked.store, &inventory);
-                panes::refresh_metadata(&mut locked.store);
+                panes::refresh_metadata(&mut locked.store, deps);
                 locked.save()?;
             }
             json(&locked.store.snapshot(at))
@@ -128,7 +136,7 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
                 .parse::<bool>()
                 .map_err(|_| "pin requires true or false")?;
             let mut locked = LockedStore::open(&dir)?;
-            let inventory = process::inventory()?;
+            let inventory = process::inventory(deps.runner)?;
             locked.store.reconcile(&inventory.found, now_ms());
             locked.store.set_pinned(id, pinned)?;
             locked.save()?;
@@ -145,12 +153,12 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
                     .cloned()
                     .ok_or("agent no longer exists")?
             };
-            json(&panes::preview(&agent)?)
+            json(&panes::preview(&agent, deps)?)
         }
         "resolve" => {
             let id = args.get(1).ok_or("resolve requires an agent ID")?;
             let mut locked = LockedStore::open(&dir)?;
-            let inventory = process::inventory()?;
+            let inventory = process::inventory(deps.runner)?;
             locked.store.reconcile(&inventory.found, now_ms());
             locked.save()?;
             let agent = locked
@@ -167,7 +175,7 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
             let event: AgentEvent =
                 serde_json::from_str(&read_input()?).map_err(|e| e.to_string())?;
             let mut locked = LockedStore::open(&dir)?;
-            let inventory = process::inventory()?;
+            let inventory = process::inventory(deps.runner)?;
             locked.store.reconcile(&inventory.found, now_ms());
             let applied = locked.store.apply(&event)? == ApplyResult::Applied;
             locked.save()?;
@@ -177,7 +185,7 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
     }
 }
 
-fn hook(dir: &Path) -> Result<(), String> {
+fn hook(dir: &Path, deps: &host::HostDependencies) -> Result<(), String> {
     let Ok(session) = env::var("ZELLIJ_SESSION_NAME") else {
         return Ok(());
     };
@@ -196,7 +204,7 @@ fn hook(dir: &Path) -> Result<(), String> {
     let event_id = uuid::Uuid::new_v4().to_string();
     {
         let mut locked = LockedStore::open(dir)?;
-        let inventory = process::inventory()?;
+        let inventory = process::inventory(deps.runner)?;
         let found = inventory
             .found
             .iter()
@@ -243,34 +251,8 @@ fn hook(dir: &Path) -> Result<(), String> {
     }
     // Notification is an optimization. State was already committed, so pipe
     // failure or a missing UI cannot lose the event or block an agent forever.
-    notify(&session, &event_id);
+    let _ = deps
+        .terminal
+        .notify_changed(&terminal::SessionId(session), &event_id);
     Ok(())
-}
-
-fn notify(session: &str, event_id: &str) {
-    let mut command = Command::new("zellij");
-    command
-        .args([
-            "--session",
-            session,
-            "pipe",
-            "--name",
-            "agent-dashboard-changed",
-            "--",
-            event_id,
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    if let Ok(mut child) = command.spawn() {
-        let deadline = Instant::now() + Duration::from_millis(500);
-        while Instant::now() < deadline {
-            if child.try_wait().ok().flatten().is_some() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-    }
 }

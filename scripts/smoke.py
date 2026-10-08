@@ -166,7 +166,17 @@ load_plugins {{
         # A fixture executable named codex tests discovery without inference.
         fake = directory / "codex"
         source = directory / "codex.rs"
-        source.write_text("fn main() { std::thread::sleep(std::time::Duration::from_secs(300)); }\n")
+        source.write_text(r'''use std::io::{BufRead, Write};
+fn main() {
+    println!("fixture ready");
+    let mut log = std::fs::OpenOptions::new().create(true).append(true).open("input.log").unwrap();
+    for line in std::io::stdin().lock().lines() {
+        let line = line.unwrap();
+        writeln!(log, "{line}").unwrap();
+        log.flush().unwrap();
+    }
+}
+''')
         rustup = os.environ.get("ZAD_RUSTUP", str(Path.home() / ".cargo/bin/rustup"))
         subprocess.run([rustup, "run", "1.88.0", "rustc", str(source), "-o", str(fake)], check=True)
         for session in sessions:
@@ -174,6 +184,43 @@ load_plugins {{
         def discovered():
             return [a for a in host_call("snapshot")["agents"] if a["identity"]["session_name"] in sessions and a["tool"] == "codex"]
         rows = wait_for("discovery across two sessions including spaces", lambda: discovered() if len(discovered()) == 2 else None)
+        # Drive host adapters with a local fixture, never a model request.
+        action_environment = os.environ.copy()
+        # A caller's pane ID belongs to its own session, not this test session.
+        for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
+            action_environment.pop(key, None)
+        action_environment["PATH"] = str(directory) + os.pathsep + action_environment.get("PATH", "")
+        def host_action(request):
+            return json.loads(subprocess.check_output([str(host), "--state-dir", str(state), "action", json.dumps(request)],
+                                                     env=action_environment, text=True))
+        command_dir = directory / "명령 검증"
+        command_dir.mkdir()
+        epoch = next(a["identity"]["session_epoch"] for a in rows if a["identity"]["session_name"] == first)
+        launch_request = {"request_id": "adapter-launch", "action": {"kind": "launch", "session": first,
+                          "epoch": epoch, "cwd": str(command_dir), "tool": "codex"}}
+        launched = host_action(launch_request)
+        assert launched["state"] == "succeeded", launched
+        assert host_action(launch_request)["pane_id"] == launched["pane_id"]
+        def launched_agent():
+            host_call("scan")
+            return next((a for a in host_call("snapshot")["agents"] if a["identity"]["session_name"] == first
+                         and a["identity"]["pane_id"] == launched["pane_id"] and a["liveness"] == "live"), None)
+        agent = wait_for("host adapter creates and discovers pane once", launched_agent)
+        wait_for("host adapter reads pane screen", lambda: "fixture ready" in host_call("preview", agent["identity"]["agent_id"])["text"])
+        input_request = {"request_id": "adapter-input", "action": {"kind": "input", "target": agent["identity"], "text": "한글 첫 줄\nsecond line"}}
+        assert host_action(input_request)["state"] == "succeeded"
+        assert host_action(input_request)["state"] == "succeeded"
+        input_log = command_dir / "input.log"
+        wait_for("host adapter sends multiline input", lambda: "second line" in input_log.read_text())
+        assert input_log.read_text().count("한글 첫 줄") == 1
+        print("PASS duplicate input does not repeat delivery", flush=True)
+        close_request = {"request_id": "adapter-close", "action": {"kind": "close", "target": agent["identity"]}}
+        assert host_action(close_request)["state"] == "succeeded"
+        assert host_action(close_request)["state"] == "succeeded"
+        assert not any(p["id"] == launched["pane_id"] and not p["is_plugin"]
+                       for p in json.loads(call(first, "action", "list-panes", "--all", "--json")))
+        print("PASS host adapter closes pane once", flush=True)
+
         # Exercise keyboard search and the actual cross-session focus API.
         target = next(a for a in rows if a["identity"]["session_name"] == sessions[1])
         def attached(session):

@@ -20,6 +20,18 @@ Zellij dashboard ─────────────── dashboard-host sn
 
 collector는 시작 권한을 받은 뒤 화면에서 숨겨진다. 대시보드 화면을 닫거나 클라이언트가 detach해도 타이머 수집이 남는다. 모든 수집기 세션을 종료하면 주기적 탐지도 멈춘다. 연결된 Claude 훅 자체는 저장소를 직접 갱신할 수 있다.
 
+## 호스트 인터페이스와 의존성 주입
+
+호스트 시작점은 `SystemCommandRunner`와 `ZellijCli`를 생성하고 `HostDependencies`로 명령 처리 함수에 전달한다. 기능 로직은 구체적인 CLI 구현을 생성하거나 전역 실행기에 접근하지 않는다.
+
+`TerminalHost`는 terminal pane 목록과 화면 조회, 문자·바이트 입력, 종료, 생성, 변경 통지를 제공한다. `SessionId`, 불투명한 `PaneId`, `TerminalPane`, `NewPane`을 사용하며 Zellij JSON, `terminal_N`, CLI 옵션은 계약에 포함하지 않는다. 목록에는 terminal pane만 포함한다. 생성 옵션은 cwd, 제목, floating, close-on-exit, no-focus, 프로그램과 argv다. `notify_changed`는 이벤트 ID를 전달하는 최선의 통지이며 저장된 상태가 기준이다.
+
+`ZellijCli`는 실행 파일 경로와 `CommandRunner`를 주입받고 Zellij 명령 조립과 응답 파싱을 담당한다. `CommandRunner`는 Zellij 외에도 git, ps, zoxide, 자식 worktree 셸 명령을 실행한다. `CommandSpec`은 프로그램·argv·cwd·환경 변수 설정/제거·선택적 timeout·스트림별 출력 제한·수집/폐기 모드를 정의한다. 실행기는 종료 상태와 stdout/stderr를 반환하며 실행 오류, timeout, 출력 초과를 구분한다. timeout과 출력 초과 시 자식을 종료하고 회수한다. argv는 셸에 재해석하지 않고 직접 전달한다. 사용자가 요청한 셸 명령과 EDITOR 실행만 기존 셸 경로를 유지한다.
+
+입력의 bracketed paste와 Enter는 별도 호출이며 그 사이에 대상 실행 세대를 재검증한다. 중복 요청, 고정 대상 보호, 불명확한 결과의 자동 재전송 금지와 통지 실패 무시 정책은 유지한다. 기존 timeout과 출력 제한을 보존하며 ps는 timeout 없이 64 MiB 제한과 locale 설정을 사용한다.
+
+상태 파일과 외부 JSON 계약은 기존 숫자 pane ID를 유지한다. 호스트 경계의 변환 함수가 이를 공통 pane 식별자로 연결하므로 스키마 이관은 필요하지 않다. 다른 실행 환경을 지원할 때 `TerminalHost` 구현은 교체할 수 있지만, 전체 앱 이관에는 이 숫자 ID 호환 경계, Zellij 환경 변수와 서버 프로세스에 기반한 발견 방식, 플러그인 SDK 기반 화면 이동의 추가 변경이 필요하다. 파일·환경 접근과 실행 스크립트는 이번 주입 범위에 포함하지 않는다.
+
 ## 공유 상태와 동시성
 
 기본 저장 위치는 `${XDG_STATE_HOME:-$HOME/.local/state}/zellij-agent-dashboard`다. `store.json`은 schema version, revision, 마지막 스캔 시점, 에이전트와 활동 기록을 포함한다. 별도 `store.lock` 파일의 OS 잠금을 잡은 명령만 파일을 읽거나 갱신한다. 잠금 대기는 최대 2초다.

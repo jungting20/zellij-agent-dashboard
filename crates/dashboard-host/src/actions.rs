@@ -1,6 +1,9 @@
 use crate::{
-    command, process,
+    command::{self, CommandSpec},
+    host::{pane_id, pane_number, HostDependencies},
+    process,
     storage::{now_ms, LockedStore},
+    terminal::{NewPane, SessionId},
 };
 use dashboard_core::{
     Action, ActionRequest, ActionResult, Agent, AgentEvent, Catalog, EventKind, Identity,
@@ -10,7 +13,6 @@ use std::{
     env, fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::Command,
     time::Duration,
 };
 
@@ -47,15 +49,15 @@ fn executable(name: &str) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("{name} 실행 파일을 찾을 수 없습니다"))
 }
 
-pub fn catalog(dir: &Path) -> Result<Catalog, String> {
+pub fn catalog(dir: &Path, deps: &HostDependencies) -> Result<Catalog, String> {
     let locked = LockedStore::open(dir)?;
-    let inventory = process::inventory()?;
+    let inventory = process::inventory(deps.runner)?;
     let mut directories = locked.store.recent_directories.clone();
     directories.extend(locked.store.agents.values().map(|a| a.cwd.clone()));
     if let Ok(bytes) = command::output(
-        Command::new("zoxide").args(["query", "--list"]),
-        Duration::from_millis(500),
-        128 * 1024,
+        deps.runner,
+        CommandSpec::new("zoxide", Some(Duration::from_millis(500)), 128 * 1024)
+            .args(["query", "--list"]),
     ) {
         directories.extend(String::from_utf8_lossy(&bytes).lines().map(String::from));
     }
@@ -112,34 +114,14 @@ pub fn link_launches(store: &mut dashboard_core::Store, inventory: &process::Inv
     }
 }
 
-fn checked(dir: &Path, target: &Identity) -> Result<Agent, String> {
+fn checked(dir: &Path, target: &Identity, deps: &HostDependencies) -> Result<Agent, String> {
     let mut locked = LockedStore::open(dir)?;
-    let inventory = process::inventory()?;
+    let inventory = process::inventory(deps.runner)?;
     locked.store.reconcile(&inventory.found, now_ms());
     link_launches(&mut locked.store, &inventory);
     locked.store.validate_target(target)?;
     locked.save()?;
     Ok(locked.store.agents[&target.agent_id].clone())
-}
-
-fn zellij(session: &str, args: &[&str]) -> Result<String, String> {
-    let bytes = command::output(
-        Command::new("zellij")
-            .args(["--session", session, "action"])
-            .args(args),
-        Duration::from_millis(1200),
-        128 * 1024,
-    )?;
-    Ok(String::from_utf8_lossy(&bytes).trim().into())
-}
-
-fn pane_number(value: &str) -> Result<u32, String> {
-    value
-        .trim()
-        .strip_prefix("terminal_")
-        .ok_or("Zellij did not return a terminal pane ID")?
-        .parse()
-        .map_err(|_| "invalid created pane ID".into())
 }
 
 fn cwd(value: &str) -> Result<PathBuf, String> {
@@ -153,24 +135,38 @@ fn cwd(value: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn git(directory: &Path, args: &[&str]) -> Result<String, String> {
-    let bytes = command::output(
-        Command::new("git").arg("-C").arg(directory).args(args),
-        Duration::from_secs(10),
-        256 * 1024,
-    )?;
+fn git(directory: &Path, args: &[&str], deps: &HostDependencies) -> Result<String, String> {
+    let spec = CommandSpec::new("git", Some(Duration::from_secs(10)), 256 * 1024)
+        .args([
+            std::ffi::OsString::from("-C"),
+            directory.as_os_str().to_owned(),
+        ])
+        .args(args.iter().copied());
+    let bytes = command::output(deps.runner, spec)?;
     Ok(String::from_utf8_lossy(&bytes).trim().into())
+}
+
+struct LaunchTarget<'a> {
+    session: &'a str,
+    epoch: &'a str,
+    directory: &'a str,
+    tool: &'a str,
+    parent: Option<&'a Identity>,
 }
 
 fn launch(
     dir: &Path,
     request: &ActionRequest,
-    session: &str,
-    epoch: &str,
-    directory: &str,
-    tool: &str,
-    parent: Option<&Identity>,
+    target: LaunchTarget<'_>,
+    deps: &HostDependencies,
 ) -> Result<(String, Option<u32>, String), String> {
+    let LaunchTarget {
+        session,
+        epoch,
+        directory,
+        tool,
+        parent,
+    } = target;
     let path = cwd(directory)?;
     let name = TOOLS
         .iter()
@@ -178,12 +174,12 @@ fn launch(
         .ok_or("지원하지 않는 에이전트 도구")?
         .1;
     let exe = executable(name)?;
-    let inventory = process::inventory()?;
+    let inventory = process::inventory(deps.runner)?;
     if inventory.epochs.get(session).map(String::as_str) != Some(epoch) {
         return Err("Zellij session changed or exited".into());
     }
     if let Some(parent) = parent {
-        checked(dir, parent)?;
+        checked(dir, parent, deps)?;
     }
     let directory = path.to_string_lossy().to_string();
     {
@@ -203,23 +199,20 @@ fn launch(
         locked.save()?;
     }
     let marker = format!("ZAD_LAUNCH_ID={}", request.request_id);
-    let pane = pane_number(&zellij(
-        session,
-        &[
-            "new-pane",
-            "--no-focus",
-            "--cwd",
-            &directory,
-            "--name",
-            &format!(
+    let pane = pane_number(&deps.terminal.new_pane(
+        &SessionId(session.into()),
+        &NewPane {
+            cwd: path.clone(),
+            title: format!(
                 "{tool} · {}",
                 path.file_name().unwrap_or_default().to_string_lossy()
             ),
-            "--",
-            "/usr/bin/env",
-            &marker,
-            &exe.to_string_lossy(),
-        ],
+            no_focus: true,
+            floating: false,
+            close_on_exit: false,
+            program: "/usr/bin/env".into(),
+            args: vec![marker.into(), exe.into_os_string()],
+        },
     )?)?;
     let mut locked = LockedStore::open(dir)?;
     locked
@@ -233,7 +226,7 @@ fn launch(
     Ok((format!("{tool} 실행 완료"), Some(pane), directory))
 }
 
-fn send(dir: &Path, target: &Identity, text: &str) -> Result<(), String> {
+fn send(dir: &Path, target: &Identity, text: &str, deps: &HostDependencies) -> Result<(), String> {
     if text.trim().is_empty()
         || text.len() > 64 * 1024
         || text
@@ -242,16 +235,14 @@ fn send(dir: &Path, target: &Identity, text: &str) -> Result<(), String> {
     {
         return Err("입력은 64 KiB 이하의 텍스트여야 합니다".into());
     }
-    checked(dir, target)?;
+    checked(dir, target, deps)?;
     // Paste preserves multiline instructions. Delivery failures are uncertain.
     let paste = format!("\x1b[200~{text}\x1b[201~");
-    let pane = format!("terminal_{}", target.pane_id);
-    zellij(
-        &target.session_name,
-        &["write-chars", "--pane-id", &pane, &paste],
-    )?;
-    checked(dir, target)?;
-    zellij(&target.session_name, &["write", "--pane-id", &pane, "13"])?;
+    let session = SessionId(target.session_name.clone());
+    let pane = pane_id(target.pane_id);
+    deps.terminal.write_text(&session, &pane, &paste)?;
+    checked(dir, target, deps)?;
+    deps.terminal.write_bytes(&session, &pane, &[13])?;
     let mut locked = LockedStore::open(dir)?;
     let at = now_ms();
     locked.store.validate_target(target)?;
@@ -272,17 +263,21 @@ fn send(dir: &Path, target: &Identity, text: &str) -> Result<(), String> {
     locked.save()
 }
 
-fn execute(dir: &Path, request: &ActionRequest) -> Result<(String, Option<u32>, String), String> {
+fn execute(
+    dir: &Path,
+    request: &ActionRequest,
+    deps: &HostDependencies,
+) -> Result<(String, Option<u32>, String), String> {
     match &request.action {
         Action::Input { target, text } => {
-            send(dir, target, text)?;
+            send(dir, target, text, deps)?;
             Ok(("입력 전송 완료".into(), None, String::new()))
         }
         Action::Alias { target, alias } => {
             if alias.len() > 120 || alias.chars().any(char::is_control) {
                 return Err("한 줄 태그를 입력해주세요 (120 bytes 이하)".into());
             }
-            checked(dir, target)?;
+            checked(dir, target, deps)?;
             let mut locked = LockedStore::open(dir)?;
             locked.store.validate_target(target)?;
             locked.store.agents.get_mut(&target.agent_id).unwrap().alias = alias.trim().into();
@@ -291,7 +286,7 @@ fn execute(dir: &Path, request: &ActionRequest) -> Result<(String, Option<u32>, 
             Ok(("태그 저장 완료".into(), None, String::new()))
         }
         Action::Close { target } => {
-            checked(dir, target)?;
+            checked(dir, target, deps)?;
             // Serialize pin settings through the final protection check/close.
             let mut locked = LockedStore::open(dir)?;
             locked.store.validate_target(target)?;
@@ -309,13 +304,9 @@ fn execute(dir: &Path, request: &ActionRequest) -> Result<(String, Option<u32>, 
                 }
                 id = agent.parent_id.as_deref();
             }
-            zellij(
-                &target.session_name,
-                &[
-                    "close-pane",
-                    "--pane-id",
-                    &format!("terminal_{}", target.pane_id),
-                ],
+            deps.terminal.close_pane(
+                &SessionId(target.session_name.clone()),
+                &pane_id(target.pane_id),
             )?;
             let agent = locked.store.agents.get_mut(&target.agent_id).unwrap();
             agent.ended = true;
@@ -329,18 +320,30 @@ fn execute(dir: &Path, request: &ActionRequest) -> Result<(String, Option<u32>, 
             epoch,
             cwd,
             tool,
-        } => launch(dir, request, session, epoch, cwd, tool, None),
+        } => launch(
+            dir,
+            request,
+            LaunchTarget {
+                session,
+                epoch,
+                directory: cwd,
+                tool,
+                parent: None,
+            },
+            deps,
+        ),
         Action::Worktree {
             parent,
             branch,
             tool,
         } => {
-            let agent = checked(dir, parent)?;
+            let agent = checked(dir, parent, deps)?;
             let root = cwd(&git(
                 Path::new(&agent.cwd),
                 &["rev-parse", "--show-toplevel"],
+                deps,
             )?)?;
-            git(&root, &["check-ref-format", "--branch", branch])?;
+            git(&root, &["check-ref-format", "--branch", branch], deps)?;
             if branch.starts_with('-') {
                 return Err("invalid branch name".into());
             }
@@ -382,38 +385,40 @@ fn execute(dir: &Path, request: &ActionRequest) -> Result<(String, Option<u32>, 
                     &path.to_string_lossy(),
                     "HEAD",
                 ],
+                deps,
             )?;
             launch(
                 dir,
                 request,
-                &parent.session_name,
-                &parent.session_epoch,
-                &path.to_string_lossy(),
-                tool,
-                Some(parent),
+                LaunchTarget {
+                    session: &parent.session_name,
+                    epoch: &parent.session_epoch,
+                    directory: &path.to_string_lossy(),
+                    tool,
+                    parent: Some(parent),
+                },
+                deps,
             )
         }
         Action::Lazygit { target } => {
-            let agent = checked(dir, target)?;
+            let agent = checked(dir, target, deps)?;
             let exe = executable("lazygit")?;
-            let pane = pane_number(&zellij(
-                &target.session_name,
-                &[
-                    "new-pane",
-                    "--floating",
-                    "--close-on-exit",
-                    "--cwd",
-                    &agent.cwd,
-                    "--name",
-                    "lazygit",
-                    "--",
-                    &exe.to_string_lossy(),
-                ],
+            let pane = pane_number(&deps.terminal.new_pane(
+                &SessionId(target.session_name.clone()),
+                &NewPane {
+                    cwd: agent.cwd.into(),
+                    title: "lazygit".into(),
+                    floating: true,
+                    close_on_exit: true,
+                    no_focus: false,
+                    program: exe.into_os_string(),
+                    args: vec![],
+                },
             )?)?;
             Ok(("lazygit 실행 완료".into(), Some(pane), String::new()))
         }
         Action::Editor { target, text } => {
-            let agent = checked(dir, target)?;
+            let agent = checked(dir, target, deps)?;
             let path = dir.join(format!("edit-{}.txt", uuid::Uuid::new_v4()));
             fs::write(&path, text).map_err(|e| e.to_string())?;
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
@@ -423,23 +428,22 @@ fn execute(dir: &Path, request: &ActionRequest) -> Result<(String, Option<u32>, 
                 .unwrap_or_else(|_| "vi".into());
             // EDITOR is a user command; the filename is a positional argument.
             let script = format!("exec {editor} \"$1\"");
-            let pane = pane_number(&zellij(
-                &target.session_name,
-                &[
-                    "new-pane",
-                    "--floating",
-                    "--close-on-exit",
-                    "--cwd",
-                    &agent.cwd,
-                    "--name",
-                    "지시 편집",
-                    "--",
-                    "/bin/sh",
-                    "-c",
-                    &script,
-                    "editor",
-                    &path.to_string_lossy(),
-                ],
+            let pane = pane_number(&deps.terminal.new_pane(
+                &SessionId(target.session_name.clone()),
+                &NewPane {
+                    cwd: agent.cwd.into(),
+                    title: "지시 편집".into(),
+                    floating: true,
+                    close_on_exit: true,
+                    no_focus: false,
+                    program: "/bin/sh".into(),
+                    args: vec![
+                        "-c".into(),
+                        script.into(),
+                        "editor".into(),
+                        path.as_os_str().to_owned(),
+                    ],
+                },
             )?)?;
             Ok((
                 "에디터를 닫으면 편집한 지시를 복원합니다".into(),
@@ -451,7 +455,7 @@ fn execute(dir: &Path, request: &ActionRequest) -> Result<(String, Option<u32>, 
             parent,
             command: shell,
         } => {
-            checked(dir, parent)?;
+            checked(dir, parent, deps)?;
             if shell.trim().is_empty() || shell.len() > 64 * 1024 {
                 return Err("셸 명령어를 입력하세요".into());
             }
@@ -472,14 +476,12 @@ fn execute(dir: &Path, request: &ActionRequest) -> Result<(String, Option<u32>, 
                 if !paths.insert(child.cwd.clone()) {
                     continue;
                 }
-                checked(dir, &child.identity)?;
-                let result = command::output(
-                    Command::new("/bin/sh")
-                        .args(["-lc", shell])
-                        .current_dir(cwd(&child.cwd)?),
-                    Duration::from_secs(60),
-                    64 * 1024,
-                );
+                checked(dir, &child.identity, deps)?;
+                let mut spec =
+                    CommandSpec::new("/bin/sh", Some(Duration::from_secs(60)), 64 * 1024)
+                        .args(["-lc", shell]);
+                spec.cwd = Some(cwd(&child.cwd)?);
+                let result = command::output(deps.runner, spec);
                 results.push(format!(
                     "{}\n{}",
                     child.cwd,
@@ -495,8 +497,8 @@ fn execute(dir: &Path, request: &ActionRequest) -> Result<(String, Option<u32>, 
             Ok((results.join("\n\n"), None, String::new()))
         }
         Action::Merge { parent, child } => {
-            let pa = checked(dir, parent)?;
-            let ch = checked(dir, child)?;
+            let pa = checked(dir, parent, deps)?;
+            let ch = checked(dir, child, deps)?;
             if ch.parent_id.as_ref() != Some(&parent.agent_id) {
                 return Err("선택한 에이전트는 직접 자식이 아닙니다".into());
             }
@@ -507,18 +509,22 @@ fn execute(dir: &Path, request: &ActionRequest) -> Result<(String, Option<u32>, 
                     "부모와 자식이 idle 또는 done일 때 병합 지시를 보낼 수 있습니다".into(),
                 );
             }
-            let branch = git(Path::new(&ch.cwd), &["branch", "--show-current"])?;
+            let branch = git(Path::new(&ch.cwd), &["branch", "--show-current"], deps)?;
             let instruction=format!("자식 worktree {}의 작업을 검토하고 현재 브랜치에 병합해주세요.\n자식 경로: {}\n자식 브랜치: {}\n충돌과 테스트 결과를 확인하고 처리 결과를 보고해주세요.",ch.project(),ch.cwd,branch);
-            send(dir, parent, &instruction)?;
+            send(dir, parent, &instruction, deps)?;
             Ok(("부모에게 병합 지시 전송 완료".into(), None, String::new()))
         }
     }
 }
 
-pub fn action(dir: &Path, request: ActionRequest) -> Result<ActionResult, String> {
+pub fn action(
+    dir: &Path,
+    request: ActionRequest,
+    deps: &HostDependencies,
+) -> Result<ActionResult, String> {
     {
         let mut locked = LockedStore::open(dir)?;
-        let inventory = process::inventory()?;
+        let inventory = process::inventory(deps.runner)?;
         locked.store.reconcile(&inventory.found, now_ms());
         link_launches(&mut locked.store, &inventory);
         if !locked.store.claim(&request, now_ms())? {
@@ -526,7 +532,7 @@ pub fn action(dir: &Path, request: ActionRequest) -> Result<ActionResult, String
         }
         locked.save()?;
     }
-    let result = execute(dir, &request);
+    let result = execute(dir, &request, deps);
     let mut locked = LockedStore::open(dir)?;
     let record = locked
         .store
@@ -565,18 +571,19 @@ pub fn result(dir: &Path, id: &str) -> Result<ActionResult, String> {
         .ok_or("unknown request ID".into())
 }
 
-pub fn edited(dir: &Path, id: &str) -> Result<serde_json::Value, String> {
+pub fn edited(dir: &Path, id: &str, deps: &HostDependencies) -> Result<serde_json::Value, String> {
     let result = result(dir, id)?;
     let Action::Editor { target, .. } = &result.request.action else {
         return Err("request is not an editor action".into());
     };
-    let panes = zellij(&target.session_name, &["list-panes", "--json"])?;
-    let panes: serde_json::Value = serde_json::from_str(&panes).map_err(|e| e.to_string())?;
+    let panes = deps.terminal.list_panes(
+        &SessionId(target.session_name.clone()),
+        false,
+        Duration::from_millis(1200),
+    )?;
     let open = panes
-        .as_array()
-        .ok_or("invalid pane list")?
         .iter()
-        .any(|p| p["is_plugin"] == false && p["id"].as_u64() == result.pane_id.map(u64::from));
+        .any(|pane| result.pane_id.is_some_and(|id| pane.id == pane_id(id)));
     if open {
         return Ok(serde_json::json!({"ready":false}));
     }
@@ -585,4 +592,184 @@ pub fn edited(dir: &Path, id: &str) -> Result<serde_json::Value, String> {
     }
     let text = fs::read_to_string(&result.path).map_err(|e| e.to_string())?;
     Ok(serde_json::json!({"ready":true,"text":text,"target":target}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        command::{CommandError, CommandOutput, CommandRunner},
+        terminal::{PaneId, TerminalHost, TerminalPane},
+    };
+    use std::cell::{Cell, RefCell};
+
+    #[derive(Default)]
+    struct FakeHost {
+        changed: Cell<bool>,
+        change_after_paste: Cell<bool>,
+        calls: RefCell<Vec<String>>,
+    }
+    impl FakeHost {
+        fn inventory_text(&self) -> String {
+            let started = if self.changed.get() {
+                "10:02:00"
+            } else {
+                "10:01:00"
+            };
+            format!("10 1 Mon Oct 5 10:00:00 2026 zellij --server /tmp/dev\n20 10 Mon Oct 5 {started} 2026 /bin/codex ZELLIJ_SESSION_NAME=dev ZELLIJ_PANE_ID=7 PWD=/tmp\n{} 1 Mon Oct 5 10:00:00 2026 /bin/test\n", std::process::id())
+        }
+        fn seed(&self, dir: &Path) -> Identity {
+            let inventory = process::parse_inventory(&self.inventory_text()).unwrap();
+            let target = inventory.found[0].identity.clone();
+            let mut locked = LockedStore::open(dir).unwrap();
+            locked.store.reconcile(&inventory.found, now_ms());
+            locked.save().unwrap();
+            target
+        }
+    }
+    impl CommandRunner for FakeHost {
+        fn run(&self, spec: &CommandSpec) -> Result<CommandOutput, CommandError> {
+            assert_eq!(spec.program, "ps");
+            assert_eq!(
+                spec.args,
+                ["axeww", "-o", "pid=,ppid=,lstart=,command="].map(std::ffi::OsString::from)
+            );
+            assert_eq!(
+                spec.env,
+                vec![
+                    ("LC_ALL".into(), None),
+                    ("LC_TIME".into(), Some("C".into())),
+                    ("LC_CTYPE".into(), Some("en_US.UTF-8".into()))
+                ]
+            );
+            Ok(CommandOutput {
+                success: true,
+                code: Some(0),
+                stdout: self.inventory_text().into_bytes(),
+                stderr: vec![],
+            })
+        }
+    }
+    impl TerminalHost for FakeHost {
+        fn list_panes(
+            &self,
+            _: &SessionId,
+            _: bool,
+            _: Duration,
+        ) -> Result<Vec<TerminalPane>, String> {
+            panic!("unexpected list")
+        }
+        fn screen(&self, _: &SessionId, _: &PaneId) -> Result<String, String> {
+            panic!("unexpected screen")
+        }
+        fn write_text(&self, session: &SessionId, pane: &PaneId, text: &str) -> Result<(), String> {
+            assert_eq!(session.0, "dev");
+            assert_eq!(*pane, pane_id(7));
+            self.calls.borrow_mut().push(text.into());
+            if self.change_after_paste.get() {
+                self.changed.set(true);
+            }
+            Ok(())
+        }
+        fn write_bytes(&self, _: &SessionId, _: &PaneId, bytes: &[u8]) -> Result<(), String> {
+            assert_eq!(bytes, [13]);
+            self.calls.borrow_mut().push("enter".into());
+            Ok(())
+        }
+        fn close_pane(&self, _: &SessionId, _: &PaneId) -> Result<(), String> {
+            self.calls.borrow_mut().push("close".into());
+            Ok(())
+        }
+        fn new_pane(&self, _: &SessionId, _: &NewPane) -> Result<PaneId, String> {
+            panic!("unexpected new pane")
+        }
+        fn notify_changed(&self, _: &SessionId, _: &str) -> Result<(), String> {
+            panic!("unexpected notify")
+        }
+    }
+
+    #[test]
+    fn duplicate_input_does_not_repeat_paste_or_enter() {
+        let directory = tempfile::tempdir().unwrap();
+        let fake = FakeHost::default();
+        let target = fake.seed(directory.path());
+        let deps = HostDependencies {
+            runner: &fake,
+            terminal: &fake,
+        };
+        let request = ActionRequest {
+            request_id: "input-once".into(),
+            action: Action::Input {
+                target,
+                text: "한글\n두 줄".into(),
+            },
+        };
+        assert_eq!(
+            action(directory.path(), request.clone(), &deps)
+                .unwrap()
+                .state,
+            RequestState::Succeeded
+        );
+        assert_eq!(
+            action(directory.path(), request, &deps).unwrap().state,
+            RequestState::Succeeded
+        );
+        assert_eq!(
+            *fake.calls.borrow(),
+            ["\x1b[200~한글\n두 줄\x1b[201~", "enter"]
+        );
+    }
+
+    #[test]
+    fn replaced_process_after_paste_blocks_enter_and_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let fake = FakeHost::default();
+        fake.change_after_paste.set(true);
+        let target = fake.seed(directory.path());
+        let deps = HostDependencies {
+            runner: &fake,
+            terminal: &fake,
+        };
+        let request = ActionRequest {
+            request_id: "changed-input".into(),
+            action: Action::Input {
+                target,
+                text: "hello".into(),
+            },
+        };
+        assert_eq!(
+            action(directory.path(), request.clone(), &deps)
+                .unwrap()
+                .state,
+            RequestState::Uncertain
+        );
+        assert_eq!(
+            action(directory.path(), request, &deps).unwrap().state,
+            RequestState::Uncertain
+        );
+        assert_eq!(*fake.calls.borrow(), ["\x1b[200~hello\x1b[201~"]);
+    }
+
+    #[test]
+    fn pin_protection_blocks_close_before_adapter_call() {
+        let directory = tempfile::tempdir().unwrap();
+        let fake = FakeHost::default();
+        let target = fake.seed(directory.path());
+        {
+            let mut locked = LockedStore::open(directory.path()).unwrap();
+            locked.store.set_pinned(&target.agent_id, true).unwrap();
+            locked.save().unwrap();
+        }
+        let deps = HostDependencies {
+            runner: &fake,
+            terminal: &fake,
+        };
+        let request = ActionRequest {
+            request_id: "pinned-close".into(),
+            action: Action::Close { target },
+        };
+        let error = action(directory.path(), request, &deps).unwrap_err();
+        assert!(error.contains("고정"));
+        assert!(fake.calls.borrow().is_empty());
+    }
 }
