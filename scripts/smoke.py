@@ -87,6 +87,7 @@ class Client:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--real-claude", action="store_true", help="also start Claude without submitting a model request")
+    parser.add_argument("--portable-paths", action="store_true", help="check aliases and ~/ host/state paths")
     args = parser.parse_args()
     zellij = shutil.which("zellij")
     assert zellij, "zellij is required"
@@ -104,28 +105,37 @@ def main():
     (state / "store.json").write_bytes(legacy_bytes)
     wasm = directory / "dashboard.wasm"
     shutil.copy2(ROOT / "dist/agent-dashboard.wasm", wasm)
+    host_path = str(host)
+    state_path = str(state)
+    plugin_url = f"file:{wasm}"
+    alias_block = ""
+    if args.portable_paths:
+        host_path = "~/" + str(host.relative_to(Path.home()))
+        state_path = "~/" + str(state.relative_to(Path.home()))
+        plugin_url = "agent-dashboard"
+        alias_block = f'plugins {{\n    agent-dashboard location="file:~/{wasm.relative_to(Path.home())}"\n}}\n'
     config = directory / "config"
     (config / "layouts").mkdir(parents=True)
     (config / "layouts/test.kdl").write_text("layout {\n    pane\n}\n")
     (config / "config.kdl").write_text(f'''default_layout "test"
 show_startup_tips false
 show_release_notes false
-keybinds {{
+{alias_block}keybinds {{
     shared_except "locked" {{
         bind "Alt u" {{
-            MessagePlugin "file:{wasm}" {{
+            MessagePlugin "{plugin_url}" {{
                 mode "collector"
-                host_path "{host}"
-                state_dir "{state}"
+                host_path "{host_path}"
+                state_dir "{state_path}"
                 name "agent-next"
                 payload "pinned-only"
             }}
         }}
         bind "Alt i" {{
-            MessagePlugin "file:{wasm}" {{
+            MessagePlugin "{plugin_url}" {{
                 mode "collector"
-                host_path "{host}"
-                state_dir "{state}"
+                host_path "{host_path}"
+                state_dir "{state_path}"
                 name "agent-next"
                 payload "idle-and-pinned"
             }}
@@ -133,17 +143,17 @@ keybinds {{
     }}
 }}
 load_plugins {{
-    "file:{wasm}" {{
+    "{plugin_url}" {{
         mode "collector"
-        host_path "{host}"
-        state_dir "{state}"
+        host_path "{host_path}"
+        state_dir "{state_path}"
     }}
 }}
 ''')
     sessions = [f"zad-smoke-{run_id}", f"zad smoke {run_id}"]
     clients = []
     background_fixtures = []
-    base_config = f"host_path={host},state_dir={state}"
+    base_config = f"host_path={host_path},state_dir={state_path}"
 
     def call(session, *command, timeout=8):
         for client in clients:
@@ -162,8 +172,11 @@ load_plugins {{
                                                  input=input, text=True))
 
     def ping(session, mode="collector", plugin=wasm):
+        # The CLI launcher resolves paths before configuring its dashboard.
+        configuration = (f"host_path={host},state_dir={state}"
+                         if plugin == ROOT / "dist/agent-dashboard.wasm" else base_config)
         output = call(session, "pipe", "--plugin", f"file:{plugin}", "--plugin-configuration",
-                      f"mode={mode},{base_config}", "--name", "agent-dashboard-ping", "--", "ping", timeout=3)
+                      f"mode={mode},{configuration}", "--name", "agent-dashboard-ping", "--", "ping", timeout=3)
         return [json.loads(line) for line in output.splitlines() if line.strip().startswith("{")]
 
     def wait_for(description, check, seconds=25):

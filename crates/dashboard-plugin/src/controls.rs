@@ -87,16 +87,7 @@ impl Dashboard {
             ("kind".into(), "action".into()),
             ("request_id".into(), request.request_id.clone()),
         ]);
-        run_command(
-            &[
-                &self.host_path,
-                "--state-dir",
-                &self.state_dir,
-                "action",
-                &payload,
-            ],
-            context,
-        );
+        self.run_host(&["action", &payload], context);
         if let Some(menu) = self.view.menu.as_mut() {
             menu.busy = true;
             menu.request_id = Some(request.request_id.clone());

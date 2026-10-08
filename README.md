@@ -43,10 +43,8 @@ export ZAD_STATE_DIR="$PWD/.local/state"
 
 ```kdl
 bind "Alt q" {
-    MessagePlugin "file:/absolute/project/dist/agent-dashboard.wasm" {
+    MessagePlugin "agent-dashboard" {
         mode "collector"
-        host_path "/absolute/project/dist/dashboard-host"
-        state_dir "/absolute/state/zellij-agent-dashboard"
         name "agent-dashboard-open"
     }
     SwitchToMode "normal";
@@ -57,16 +55,22 @@ CLI에서는 `bash scripts/open-dashboard.sh SESSION_NAME`으로 같은 동작�
 
 별도 bridge 없이 같은 `agent-dashboard.wasm`의 collector가 `agent-next` 메시지를 처리한다. 대시보드 화면이 닫혀 있어도 사용할 수 있다. 연결된 클라이언트 중 가장 작은 ID의 클라이언트가 처리하며 그 클라이언트의 현재 세션·pane을 기준으로 대시보드 표시 순서의 다음 실행으로 이동하며 마지막 다음에는 처음으로 돌아간다. 종료·미확인 실행과 부재 pane은 제외하고 이동 직전 실행 세대를 재검증한다. 고정 필터는 화면과 같은 부모 고정 상속을 적용하며 idle 필터는 정확히 `idle` 상태만 포함한다. 해당 대상이 없으면 이동하지 않는다.
 
-Zellij `config.kdl`에서 아래 플러그인 경로, `host_path`, `state_dir`를 실제 절대 경로로 지정한다. `load_plugins`와 키의 설정은 동일하게 유지하며 `scripts/dashboard.sh`에서도 같은 WASM과 상태 경로를 사용한다. 기존 `agent-next-bridge.wasm`, `executable_path`, `bridge_revision` 설정을 대체한다.
+각 컴퓨터에서 `bash scripts/build.sh && bash scripts/install.sh`를 실행하면 WASM과 해당 컴퓨터용 host를 `~/.config/zellij/plugins/`에 함께 설치한다. Zellij `config.kdl`의 기존 `plugins` 블록에 아래 별칭을 추가한다.
+
+```kdl
+plugins {
+    agent-dashboard location="file:~/.config/zellij/plugins/agent-dashboard.wasm"
+}
+```
+
+`host_path`를 생략하면 `~/.config/zellij/plugins/dashboard-host`를 사용하고, `state_dir`를 생략하면 host의 HOME/XDG 기본 상태 경로를 사용한다. 명시할 때는 절대 경로나 `~/` 경로를 지원한다. 설정과 payload는 셸의 위치 인자로 전달한다. 별칭 변경은 Zellij 세션 재시작 후 반영된다. `load_plugins`와 키의 설정은 동일하게 유지하며 `scripts/dashboard.sh`에서도 같은 WASM과 상태 경로를 사용한다. 기존 `agent-next-bridge.wasm`, `executable_path`, `bridge_revision` 설정을 대체한다.
 
 ```kdl
 keybinds {
     shared_except "locked" {
         bind "Alt u" {
-            MessagePlugin "file:/absolute/project/dist/agent-dashboard.wasm" {
+            MessagePlugin "agent-dashboard" {
                 mode "collector"
-                host_path "/absolute/project/dist/dashboard-host"
-                state_dir "/absolute/state/zellij-agent-dashboard"
                 name "agent-next"
                 payload "pinned-only"
             }
@@ -74,10 +78,8 @@ keybinds {
     }
 }
 load_plugins {
-    "file:/absolute/project/dist/agent-dashboard.wasm" {
+    "agent-dashboard" {
         mode "collector"
-        host_path "/absolute/project/dist/dashboard-host"
-        state_dir "/absolute/state/zellij-agent-dashboard"
     }
 }
 ```
@@ -100,10 +102,11 @@ Claude, Codex, Cursor CLI(`agent`), Gemini(`agy`/`gemini`), Hermes와 Pi(`pi` �
 ```sh
 ./scripts/check.sh
 python3 scripts/smoke.py
+python3 scripts/smoke.py --portable-paths
 python3 scripts/smoke.py --real-claude
 ```
 
-smoke 검증은 이름이 무작위인 전용 임시 세션만 만들고 종료한다. `--real-claude`는 격리한 설정으로 Claude를 실행하고 모델 요청 없이 SessionStart 훅을 확인한다. 테스트용 `codex` 실행 파일은 프로세스 발견용 fixture다. 상세 범위와 결과는 [실행 검증 기록](docs/runtime-validation.md)에 기록한다.
+smoke 검증은 이름이 무작위인 전용 임시 세션만 만들고 종료한다. `--portable-paths`는 플러그인 별칭과 `~/` host·상태 경로로 같은 검증을 실행한다. `--real-claude`는 격리한 설정으로 Claude를 실행하고 모델 요청 없이 SessionStart 훅을 확인한다. 테스트용 `codex` 실행 파일은 프로세스 발견용 fixture다. 상세 범위와 결과는 [실행 검증 기록](docs/runtime-validation.md)에 기록한다.
 
 ## 현재 구현 범위
 

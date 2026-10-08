@@ -181,12 +181,7 @@ impl Dashboard {
     }
 
     fn host(&self, command: &str, argument: Option<&str>, kind: &str) {
-        let mut argv = vec![
-            self.host_path.as_str(),
-            "--state-dir",
-            self.state_dir.as_str(),
-            command,
-        ];
+        let mut argv = vec![command];
         if let Some(arg) = argument {
             argv.push(arg);
         }
@@ -194,6 +189,28 @@ impl Dashboard {
         if let Some(arg) = argument {
             context.insert("agent_id".into(), arg.into());
         }
+        self.run_host(&argv, context);
+    }
+
+    fn run_host(&self, arguments: &[&str], context: BTreeMap<String, String>) {
+        // Expand home paths in the host environment, not the WASI filesystem.
+        // Configuration and payloads remain positional arguments, never shell code.
+        let mut argv = vec![
+            "/bin/sh",
+            "-c",
+            r#"host=$1; state=$2; shift 2
+case "$host" in '~/'*) host="$HOME/${host#\~/}" ;; esac
+case "$state" in '~/'*) state="$HOME/${state#\~/}" ;; esac
+if [ -n "$state" ]; then
+    exec "$host" --state-dir "$state" "$@"
+else
+    exec "$host" "$@"
+fi"#,
+            "dashboard-host",
+            &self.host_path,
+            &self.state_dir,
+        ];
+        argv.extend_from_slice(arguments);
         run_command(&argv, context);
     }
 
@@ -236,17 +253,7 @@ impl Dashboard {
             ("kind".into(), "pin".into()),
             ("agent_id".into(), agent.identity.agent_id.clone()),
         ]);
-        run_command(
-            &[
-                &self.host_path,
-                "--state-dir",
-                &self.state_dir,
-                "pin",
-                &agent.identity.agent_id,
-                desired,
-            ],
-            context,
-        );
+        self.run_host(&["pin", &agent.identity.agent_id, desired], context);
         self.pin_pending = true;
         self.message = "Updating pin…".into();
     }
@@ -385,11 +392,17 @@ impl ZellijPlugin for Dashboard {
             .unwrap_or_default()
             .as_nanos();
         self.collector = configuration.get("mode").map(String::as_str) == Some("collector");
-        self.host_path = configuration.get("host_path").cloned().unwrap_or_default();
+        self.host_path = configuration
+            .get("host_path")
+            .cloned()
+            .unwrap_or_else(|| "~/.config/zellij/plugins/dashboard-host".into());
         self.state_dir = configuration.get("state_dir").cloned().unwrap_or_default();
-        if !Path::new(&self.host_path).is_absolute() || !Path::new(&self.state_dir).is_absolute() {
+        let valid_path = |path: &str| Path::new(path).is_absolute() || path.starts_with("~/");
+        if !valid_path(&self.host_path)
+            || (!self.state_dir.is_empty() && !valid_path(&self.state_dir))
+        {
             self.config_error =
-                Some("host_path and state_dir must be absolute; use scripts/dashboard.sh".into());
+                Some("host_path and state_dir must be absolute or start with ~/".into());
         }
         if !matches!(
             configuration.get("mode").map(String::as_str),
