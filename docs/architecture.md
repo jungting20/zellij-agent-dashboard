@@ -5,9 +5,9 @@ Zellij 서버가 백그라운드 수집기를 실행한다. 화면 pane과 수�
 ## 실행 경로
 
 ```text
-Claude 훅 ── dashboard-host hook ── 공유 JSON 저장소
+Claude 훅 ── dashboard-host hook ── 공유 SQLite 저장소
                  │                     ↑
-                 └── pipe 변경 통지      │ 파일 잠금 + 원자적 교체
+                 └── pipe 변경 통지      │ Repository 트랜잭션
                                        │
 Zellij collector ── 2초 타이머 ── dashboard-host scan
                                        ├── 프로세스 생존 확인
@@ -24,7 +24,7 @@ collector는 시작 권한을 받은 뒤 화면에서 숨겨진다. 대시보드
 
 ## 호스트 인터페이스와 의존성 주입
 
-호스트 시작점은 `SystemCommandRunner`와 `ZellijCli`를 생성하고 `HostDependencies`로 명령 처리 함수에 전달한다. 기능 로직은 구체적인 CLI 구현을 생성하거나 전역 실행기에 접근하지 않는다.
+호스트 시작점은 `SystemCommandRunner`, `ZellijCli`와 SQLite Repository를 생성하고 `HostDependencies`로 명령 처리 함수에 전달한다. 기능 로직은 구체적인 CLI 구현을 생성하거나 전역 실행기에 접근하지 않는다.
 
 `TerminalHost`는 terminal pane 목록과 화면 조회, 문자·바이트 입력, 종료, 생성, 변경 통지를 제공한다. `SessionId`, 불투명한 `PaneId`, `TerminalPane`, `NewPane`을 사용하며 Zellij JSON, `terminal_N`, CLI 옵션은 계약에 포함하지 않는다. 목록에는 terminal pane만 포함한다. 생성 옵션은 cwd, 제목, floating, close-on-exit, no-focus, 프로그램과 argv다. `notify_changed`는 이벤트 ID를 전달하는 최선의 통지이며 저장된 상태가 기준이다.
 
@@ -36,11 +36,21 @@ collector는 시작 권한을 받은 뒤 화면에서 숨겨진다. 대시보드
 
 ## 공유 상태와 동시성
 
-기본 저장 위치는 `${XDG_STATE_HOME:-$HOME/.local/state}/zellij-agent-dashboard`다. `store.json`은 schema version, revision, 마지막 스캔 시점, 에이전트와 활동 기록을 포함한다. 별도 `store.lock` 파일의 OS 잠금을 잡은 명령만 파일을 읽거나 갱신한다. 잠금 대기는 최대 2초다.
+기본 저장 위치는 `${XDG_STATE_HOME:-$HOME/.local/state}/zellij-agent-dashboard`이며 파일명은 `store.sqlite3`다. 실행 스크립트의 `ZAD_STATE_DIR`와 호스트의 `--state-dir`로 경로를 지정할 수 있다. SQLite는 네이티브 host에만 포함하며 플러그인은 기존 JSON 명령 응답을 사용한다. 별도 서버나 영구 연결을 추가하지 않는다.
 
-여러 세션·클라이언트의 collector가 같은 저장소를 사용한다. 별도의 작성자 선출이나 상주 조정 프로세스를 두지 않는다. 공유 마지막 스캔 시점으로 프로세스 탐지를 1.8초 이상 간격으로 제한한다. `scan_lease`의 토큰과 10초 만료 시각으로 중복 collector의 동시 수집을 제한한다. 실패 시 자신의 예약을 해제하고, helper 중단 시 만료 후 다음 collector가 이어받는다. 메타데이터·화면·프로세스 읽기는 저장소 잠금 밖에서 수행하고, 화면 조회 후 프로세스 전체 목록을 다시 확인한다. 만료되거나 교체된 예약의 결과는 저장하지 않는다. 훅은 같은 잠금 아래 현재 실행 ID를 확인하고 순서 번호를 부여해 반영한다.
+`Repository::read()`는 하나의 읽기 트랜잭션에서 일관된 `Store` 스냅샷을 반환한다. `Repository::begin()`은 갱신용 `UnitOfWork`를 반환하며 `commit()` 없이 종료하면 롤백한다. 호출부에는 `HostDependencies`로 Repository를 주입한다. 상태 전이·출처 선택·실행 세대 검증은 Rust 코어에 남고 SQL, 연결, 파일 권한과 이관은 호스트 어댑터에 둔다. 편집기에서 사용하는 `edit-*.txt`는 외부 에디터용 파일이므로 DB 상태와 별도로 유지한다.
 
-저장소 디렉터리는 700, 상태와 잠금 파일은 600 권한이다. 임시 파일에 직렬화하고 fsync 후 원자적으로 교체한다. 손상되거나 더 새로운 스키마의 파일은 덮어쓰지 않고 오류를 반환한다. 복구하려면 모든 관련 수집기를 중단하고 기존 상태 파일을 백업·이동한 뒤 다시 시작한다. 현재 저장소와 스냅샷 스키마는 2다. 이벤트 JSON은 `EVENT_SCHEMA_VERSION=1`을 유지한다. 스키마 1은 읽을 때 자동 이관하고 다음 저장에서 2로 기록한다. 기존 이벤트 순서가 있는 실행은 상태와 보고 시각을 보존하며 훅 경로로 이관한다. 기존 v1의 대시보드 생성 이벤트와 실제 훅은 구분할 수 없으므로 둘 모두 훅으로 보존한다. 순서가 없는 발견 실행은 `unknown`에서 화면 감지를 시작한다. 새 출처별 시각·관측 ID·규칙·연속 idle 확인 횟수·수집 시도 시각은 기본값으로 초기화하고, 발견 시각은 기존 상태 시작 시각으로 복원한다. 수집 예약의 기본값은 없음이다. 기존 SQLite 데이터는 읽지 않는다. 이전 바이너리는 스키마 2를 거부하므로 롤백 시에는 업그레이드 전 백업을 사용한다.
+DB는 `metadata`, `agents`, `activities`, `requests`, `launches`, `recent_directories` 테이블을 사용한다. 식별자/순서를 키로 삼고 각 레코드의 내용은 JSON 컬럼에 보존한다. 코어의 전체 스냅샷을 읽어 전이한 뒤 변경된 레코드만 추가·갱신·삭제한다. 현재 조회는 전체 스냅샷이며 SQL 조건별 조회는 제공하지 않는다. `metadata`는 revision, 마지막 스캔 시점, 수집 예약과 도메인 스키마를 포함한다.
+
+WAL과 `synchronous=FULL`을 사용한다. 조회는 작성자 예약 없이 수행하며 갱신은 `BEGIN IMMEDIATE`로 직렬화한다. SQLite 잠금 대기와 초기 WAL 설정의 BUSY 재시도는 각각 최대 2초다. 여러 세션·클라이언트의 collector가 같은 DB를 사용하며 별도의 작성자 선출을 두지 않는다. 상태 디렉터리는 로컬 파일시스템에 둔다. [SQLite WAL 문서](https://www.sqlite.org/wal.html)
+
+공유 마지막 스캔 시점으로 프로세스 탐지를 1.8초 이상 간격으로 제한한다. `scan_lease`의 토큰과 10초 만료 시각으로 중복 collector의 동시 수집을 제한한다. 실패 시 자신의 예약을 해제하고, helper 중단 시 만료 후 다음 collector가 이어받는다. 메타데이터·화면·프로세스 읽기는 갱신 트랜잭션 밖에서 수행하고, 화면 조회 후 프로세스 전체 목록을 다시 확인한다. 만료되거나 교체된 예약의 결과는 저장하지 않는다. 훅은 갱신 트랜잭션 안에서 현재 실행 ID를 확인하고 순서 번호를 부여해 반영한다. 종료 조작의 마지막 고정 보호 검사와 pane 종료는 기존과 같이 직렬화한다.
+
+저장소 디렉터리는 700, DB와 WAL 보조 파일은 600 권한이다. DB 구조 버전은 SQLite `user_version=1`이고 도메인 Store와 스냅샷 스키마는 기존 2, 이벤트 JSON은 1을 유지한다. 도메인 스키마와 DB 구조 버전은 별도로 관리한다. 손상된 DB, 알 수 없는 DB 구조 버전, 더 새로운 도메인 스키마는 재초기화하거나 덮어쓰지 않고 오류를 반환한다.
+
+DB 최초 초기화 시 같은 디렉터리의 `store.json`을 읽어 하나의 트랜잭션으로 이관한다. JSON이 없으면 `Store::default()`로 시작한다. 동시 초기화는 작성자 잠금 안에서 버전을 재확인해 이관을 한 번만 수행한다. JSON과 기존 `store.lock`은 보존하며 성공 이후에는 SQLite만 기준으로 사용한다. 이관 실패는 테이블과 버전 갱신까지 롤백하고 원본 JSON을 유지한다. 기존 JSON 스키마 1은 코어의 이관 규칙에 따라 2로 변환한다. 순서가 있는 실행의 상태·보고 시각·훅 출처를 보존하고 순서가 없는 발견 실행은 화면 감지를 시작한다. 수집 예약의 기본값은 없음이다. 참고 프로젝트에서 사용하던 SQLite DB는 읽지 않는다.
+
+업그레이드 전에 이전 host를 사용하는 collector와 훅 실행을 중단해야 한다. 구버전 JSON 작성자와 신버전 SQLite 작성자를 동시에 운영하지 않는다. 백업은 관련 collector와 훅을 중단한 뒤 상태 디렉터리 전체를 복사하거나 SQLite의 온라인 백업 도구로 수행한다. 실행 중 `store.sqlite3`만 복사하면 WAL의 최신 변경을 빠뜨릴 수 있다. 복구는 실행을 중단하고 DB와 `-wal`, `-shm`을 함께 백업·이동한 뒤 정상 DB를 복원한다. 정상 JSON으로 재이관하려면 DB 세 파일을 이동하고 JSON을 복원한 뒤 시작한다. 이전 바이너리로 롤백할 때는 보존한 JSON을 사용하며, 이관 이후 DB에서 발생한 변경은 그 JSON에 포함되지 않는다.
 
 ## 실행 식별과 상태
 

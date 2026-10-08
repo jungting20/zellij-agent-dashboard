@@ -5,6 +5,7 @@ use crate::{
 
 pub struct HostDependencies<'a> {
     pub terminal: &'a dyn TerminalHost,
+    pub repository: &'a dyn crate::repository::Repository,
     pub runner: &'a dyn CommandRunner,
 }
 

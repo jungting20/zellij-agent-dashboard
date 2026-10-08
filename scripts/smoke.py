@@ -10,6 +10,7 @@ import re
 import select
 import shutil
 import signal
+import sqlite3
 import subprocess
 import struct
 import termios
@@ -95,6 +96,12 @@ def main():
     directory = ROOT / ".local" / f"smoke-{run_id}"
     directory.mkdir(parents=True)
     state = directory / "state"
+    state.mkdir(mode=0o700)
+    # Seed the previous format before collectors start. Concurrent initialization
+    # must import once while preserving the original bytes for rollback.
+    legacy_bytes = json.dumps({"schema_version": 2, "revision": 17,
+                               "last_scan_ms": 0, "agents": {}, "activities": []}).encode()
+    (state / "store.json").write_bytes(legacy_bytes)
     wasm = directory / "dashboard.wasm"
     shutil.copy2(ROOT / "dist/agent-dashboard.wasm", wasm)
     config = directory / "config"
@@ -265,6 +272,12 @@ fn main() {
 
         # Exercise keyboard search and the actual cross-session focus API.
         target = next(a for a in rows if a["identity"]["session_name"] == sessions[1])
+        alias_request = json.dumps({"request_id": "sqlite-alias-once", "action": {
+            "kind": "alias", "target": target["identity"], "alias": "SQLite 보존 확인"}})
+        first_alias = host_call("action", alias_request)
+        assert first_alias["state"] == "succeeded"
+        assert host_call("action", alias_request) == first_alias
+        print("PASS duplicate action result and alias persisted", flush=True)
         def attached(session):
             return [line.split() for line in call(session, "action", "list-clients").splitlines()
                     if re.match(r"^\d+\s+", line)]
@@ -281,6 +294,8 @@ fn main() {
         clients.append(Client([zellij, "attach", first], directory))
         wait_for("collector available after focus", lambda: any(p["permissions"] for p in ping(first)))
         call(first, "action", "close-pane", "--pane-id", focus_ui)
+        # Pin after keyboard focus checks: pinning moves the row to the other panel.
+        host_call("pin", target["identity"]["agent_id"], "true")
         row = next(a for a in rows if a["identity"]["session_name"] == first)
         event = {"schema_version":1, "event_id":"smoke-event", "identity":row["identity"], "tool":"codex",
                  "kind":"turn_started", "sequence":1, "observed_at_ms":int(time.time()*1000),
@@ -307,6 +322,9 @@ fn main() {
         wait_for("collector survives all clients detaching", lambda: max(p["polls"] for p in ping(first)) > before)
         # Zellij 0.45.0 explicitly rejects plugin reload with no attached client.
         clients.append(Client([zellij, "attach", first], directory))
+        # A background collector can answer before the new client registers.
+        # Reload needs a real attached client, not merely a responsive collector.
+        wait_for("client registered before reload", lambda: attached(first))
         wait_for("collector available after reattach", lambda: any(p["revision"] is not None for p in ping(first)))
         revision = host_call("snapshot")["revision"]
         call(first, "action", "start-or-reload-plugin", f"file:{wasm}", "--configuration", f"mode=collector,{base_config}")
@@ -339,7 +357,20 @@ fn main() {
                            for a in host_call("snapshot")["agents"] if a["identity"]["session_name"] == first)
             wait_for("real Claude SessionStart hook", reported, seconds=40)
 
-        (directory / "result.json").write_text(json.dumps({"passed":True, "sessions":sessions, "real_claude":args.real_claude, "screen_adapter":True}, indent=2))
+        saved_target = next(a for a in host_call("snapshot")["agents"]
+                            if a["identity"] == target["identity"])
+        assert saved_target["pinned"] and saved_target["alias"] == "SQLite 보존 확인"
+        assert host_call("result", "sqlite-alias-once") == first_alias
+        assert (state / "store.json").read_bytes() == legacy_bytes
+        with sqlite3.connect(state / "store.sqlite3") as database:
+            assert database.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+            assert database.execute("PRAGMA user_version").fetchone()[0] == 1
+            assert database.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+            metadata = json.loads(database.execute("SELECT body FROM metadata WHERE id='store'").fetchone()[0])
+            assert metadata["revision"] >= 17
+            assert database.execute("SELECT count(*) FROM agents").fetchone()[0] >= 2
+        print("PASS SQLite persistence, integrity and preserved JSON import", flush=True)
+        (directory / "result.json").write_text(json.dumps({"passed":True, "sessions":sessions, "real_claude":args.real_claude, "screen_adapter":True, "sqlite_repository":True, "legacy_import":True}, indent=2))
         print(f"Artifacts: {directory}", flush=True)
     finally:
         for session in sessions:

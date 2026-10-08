@@ -73,3 +73,15 @@ Zellij 0.45.0의 소유한 임시 세션 두 개에서 `python3 scripts/smoke.py
 reload 뒤 상태 파일에 hook과 screen 출처가 모두 보존되고 수집 예약이 해제된 것도 확인했다. 실제 Gemini/Cursor 및 Claude 전체 대화 흐름의 화면 감지를 확인한 것은 아니다. 이 프로필들은 내장 규칙의 정규식 컴파일과 대표 화면 단위 테스트로 검증했다. OSC progress는 Zellij 조회 계약이 제공하지 않아 사용하지 않는다. 이번 실제 Claude 화면은 2.1.292였으며 이후 로컬 `claude --version`은 2.1.293을 보고했다. 전체 훅 이벤트 지원 범위를 이 검증만으로 확장하지 않는다.
 
 smoke는 명시적 세션 CLI 호출에서 호출자의 Zellij 환경 변수를 제거하고 fixture cwd도 임시 디렉터리로 지정한다. 초기 permission 자동 입력의 잔여 문자는 fixture 명령 전에 지운다. 세션 이동은 한 클라이언트에서 지시하고, 출발 세션의 클라이언트 감소와 대상 pane 초점을 확인한다. 서로 다른 세션에 같은 클라이언트 ID가 있으면 이동 뒤 대상 클라이언트 수가 늘지 않을 수 있다. 선택적 Claude 검사는 collector 수명 검증 뒤에 실행하여 도구 onboarding 화면이 lifecycle 자동화에 개입하지 않도록 했다.
+
+## 2026-10-08 Repository 분리와 SQLite 전환
+
+JSON 파일 저장 호출을 `Repository::read()`와 `Repository::begin()` / `UnitOfWork::commit()`으로 분리하고 `HostDependencies`로 주입했다. 저장 구현은 네이티브 SQLite 어댑터로 교체했다. 코어의 상태 전이와 플러그인의 JSON 계약은 유지하며 DB 구조는 `user_version=1`, 도메인·스냅샷 스키마는 2, 이벤트 JSON은 1이다. 전체 코어 스냅샷을 읽지만 저장은 변경된 레코드만 갱신한다.
+
+`./scripts/check.sh`에서 코어 21개와 호스트 36개, 총 57개 테스트, Rust 포맷, 네이티브/WASI Clippy 및 셸/Python 구문 검사를 통과했다. `./scripts/build.sh`로 네이티브 host와 wasm32-wasip1 release 플러그인을 빌드했다. SQLite 라이브러리는 host에만 포함한다.
+
+추가 검증은 메모리 Repository 주입, 동시 초기화·JSON 이관·작성자의 갱신 보존, 작성 중 조회의 커밋 상태 확인, 미커밋 롤백, 커밋 후 작성자 예약 해제, JSON 1→2 이관, 원본 JSON 보존과 재이관 방지, 손상·미래 버전 거부, 이관 실패 후 재시도, 변경 없는 행의 갱신 방지, 삭제 반영과 테이블 갱신 실패 시 전체 롤백, DB·WAL·SHM 권한을 포함한다. 초기 WAL 설정은 BUSY 핸들러 없이 잠금 오류가 날 수 있어 초기화 단계에만 제한된 재시도를 적용했다.
+
+Zellij 0.45.0의 소유한 임시 세션 두 개에서 `python3 scripts/smoke.py --real-claude`를 통과했다. 결과는 `.local/smoke-c29d923c5f/result.json`에 남겼고 검사 종료 후 임시 세션을 종료했다. JSON 이관 원본의 바이트 보존, 두 세션·멀티 클라이언트 수집, 화면 판별과 훅 전환, 중복 입력·종료·별칭 요청, 세션 이동, 전체 detach 후 수집, 재연결·collector reload, 고정·별칭·요청 결과 복원, 실제 Claude SessionStart 훅, SQLite `integrity_check=ok`, WAL과 DB 구조 버전을 확인했다. Claude에는 프롬프트를 제출하거나 모델 요청을 하지 않았다. 운영 세션에 설치나 reload를 적용하지 않았다.
+
+통합 검증에서 고정을 검색 검사보다 먼저 수행하면 대상 행이 다른 패널로 이동하므로 고정 검사를 세션 이동 뒤에 수행하도록 조정했다. 재연결 직후에는 백그라운드 collector 응답만으로 클라이언트 등록을 판단하지 않고 `list-clients`로 실제 등록을 확인한 뒤 reload한다. 이 대기 추가 전에는 reload 직후 pipe 응답이 시간 초과됐으며, 추가 후 전체 검증이 통과했다.

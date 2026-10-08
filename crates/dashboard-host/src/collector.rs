@@ -3,20 +3,17 @@ use crate::{
     actions,
     host::{pane_id, HostDependencies},
     panes, process,
+    repository::now_ms,
     screen::Detector,
-    storage::{now_ms, LockedStore},
     terminal::SessionId,
 };
 use dashboard_core::{Liveness, ScanLease, Snapshot, StateSignal, StatusObservation, StatusSource};
-use std::{
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
-pub fn scan(dir: &Path, deps: &HostDependencies) -> Result<Snapshot, String> {
+pub fn scan(deps: &HostDependencies) -> Result<Snapshot, String> {
     let token = uuid::Uuid::new_v4().to_string();
     {
-        let mut locked = LockedStore::open(dir)?;
+        let mut locked = deps.repository.begin()?;
         let at = now_ms();
         if at.saturating_sub(locked.store.last_scan_ms) < 1800
             || locked
@@ -32,20 +29,20 @@ pub fn scan(dir: &Path, deps: &HostDependencies) -> Result<Snapshot, String> {
             token: token.clone(),
             expires_at_ms: at + 10_000,
         });
-        locked.save()?;
+        locked.commit()?;
     }
-    let result = collect(dir, deps, &token);
+    let result = collect(deps, &token);
     // Release on success or failure; never release a newer helper's claim.
-    let mut locked = LockedStore::open(dir)?;
+    let mut locked = deps.repository.begin()?;
     if owns_claim(&locked, &token) {
         locked.store.scan_lease = None;
-        locked.save()?;
+        locked.commit()?;
     }
     result?;
     Ok(locked.store.snapshot(now_ms()))
 }
 
-fn owns_claim(locked: &LockedStore, token: &str) -> bool {
+fn owns_claim(locked: &crate::repository::UnitOfWork, token: &str) -> bool {
     locked
         .store
         .scan_lease
@@ -53,18 +50,18 @@ fn owns_claim(locked: &LockedStore, token: &str) -> bool {
         .is_some_and(|lease| lease.token == token && lease.expires_at_ms > now_ms())
 }
 
-fn collect(dir: &Path, deps: &HostDependencies, token: &str) -> Result<(), String> {
+fn collect(deps: &HostDependencies, token: &str) -> Result<(), String> {
     let detector = Detector::embedded()?;
     let inventory_at = now_ms();
     let inventory = process::inventory(deps.runner)?;
     let mut collected = {
-        let mut locked = LockedStore::open(dir)?;
+        let mut locked = deps.repository.begin()?;
         if !owns_claim(&locked, token) || inventory_at < locked.store.last_scan_ms {
             return Ok(());
         }
         locked.store.reconcile(&inventory.found, inventory_at);
         actions::link_launches(&mut locked.store, &inventory);
-        locked.save()?;
+        locked.commit()?;
         locked.store.clone()
     };
     // Metadata reads are bounded and do not block hooks on the storage lock.
@@ -128,7 +125,7 @@ fn collect(dir: &Path, deps: &HostDependencies, token: &str) -> Result<(), Strin
     }
     let verified_at = now_ms();
     let verified = process::inventory(deps.runner)?;
-    let mut locked = LockedStore::open(dir)?;
+    let mut locked = deps.repository.begin()?;
     if !owns_claim(&locked, token) || verified_at < locked.store.last_scan_ms {
         return Ok(());
     }
@@ -153,7 +150,7 @@ fn collect(dir: &Path, deps: &HostDependencies, token: &str) -> Result<(), Strin
     for signal in signals {
         locked.store.apply_signal(&signal)?;
     }
-    locked.save()
+    locked.commit()
 }
 
 #[cfg(test)]
@@ -164,10 +161,14 @@ mod tests {
         terminal::{NewPane, PaneId, TerminalHost, TerminalPane},
     };
     use dashboard_core::{AgentEvent, EventKind, Identity, Status, EVENT_SCHEMA_VERSION};
-    use std::{cell::Cell, path::PathBuf};
+    use std::{
+        cell::Cell,
+        path::{Path, PathBuf},
+    };
 
     struct Fake {
         dir: PathBuf,
+        repository: Box<dyn crate::repository::Repository>,
         changed: Cell<bool>,
         replace: bool,
         hook: bool,
@@ -185,13 +186,14 @@ mod tests {
         }
         fn seed(&self) -> Identity {
             let inventory = process::parse_inventory(&self.inventory()).unwrap();
-            let mut locked = LockedStore::open(&self.dir).unwrap();
+            let mut locked = crate::repository::at(&self.dir).begin().unwrap();
             locked.store.reconcile(&inventory.found, now_ms() - 5000);
-            locked.save().unwrap();
+            locked.commit().unwrap();
             inventory.found[0].identity.clone()
         }
         fn deps(&self) -> HostDependencies<'_> {
             HostDependencies {
+                repository: self.repository.as_ref(),
                 terminal: self,
                 runner: self,
             }
@@ -216,7 +218,7 @@ mod tests {
             _: Duration,
         ) -> Result<Vec<TerminalPane>, String> {
             // This would time out if the collector held the state lock during I/O.
-            let _locked = LockedStore::open(&self.dir).unwrap();
+            let _locked = crate::repository::at(&self.dir).begin().unwrap();
             Ok(vec![TerminalPane {
                 id: pane_id(7),
                 tab_id: Some(1),
@@ -228,9 +230,9 @@ mod tests {
         fn screen(&self, _: &SessionId, _: &PaneId) -> Result<String, String> {
             self.reads.set(self.reads.get() + 1);
             // Another collector sees the active claim and performs no reads.
-            scan(&self.dir, &self.deps()).unwrap();
+            scan(&self.deps()).unwrap();
             if self.hook {
-                let mut locked = LockedStore::open(&self.dir).unwrap();
+                let mut locked = crate::repository::at(&self.dir).begin().unwrap();
                 let agent = locked.store.agents.values().next().unwrap().clone();
                 locked
                     .store
@@ -247,7 +249,7 @@ mod tests {
                         detail: String::new(),
                     })
                     .unwrap();
-                locked.save().unwrap();
+                locked.commit().unwrap();
             }
             if self.replace {
                 self.changed.set(true);
@@ -277,6 +279,7 @@ mod tests {
     fn fake(dir: &Path) -> Fake {
         Fake {
             dir: dir.into(),
+            repository: crate::repository::at(dir),
             changed: Cell::new(false),
             replace: false,
             hook: false,
@@ -291,14 +294,14 @@ mod tests {
         let fake = fake(dir.path());
         let identity = fake.seed();
         {
-            let mut locked = LockedStore::open(dir.path()).unwrap();
+            let mut locked = crate::repository::at(dir.path()).begin().unwrap();
             locked.store.scan_lease = Some(ScanLease {
                 token: "crashed".into(),
                 expires_at_ms: now_ms() - 1,
             });
-            locked.save().unwrap();
+            locked.commit().unwrap();
         }
-        let snapshot = scan(dir.path(), &fake.deps()).unwrap();
+        let snapshot = scan(&fake.deps()).unwrap();
         assert_eq!(
             snapshot
                 .agents
@@ -308,9 +311,10 @@ mod tests {
                 .status,
             Status::Working
         );
-        scan(dir.path(), &fake.deps()).unwrap();
+        scan(&fake.deps()).unwrap();
         assert_eq!(fake.reads.get(), 1);
-        assert!(LockedStore::open(dir.path())
+        assert!(crate::repository::at(dir.path())
+            .begin()
             .unwrap()
             .store
             .scan_lease
@@ -323,8 +327,8 @@ mod tests {
         let mut fake = fake(dir.path());
         fake.hook = true;
         let identity = fake.seed();
-        scan(dir.path(), &fake.deps()).unwrap();
-        let locked = LockedStore::open(dir.path()).unwrap();
+        scan(&fake.deps()).unwrap();
+        let locked = crate::repository::at(dir.path()).begin().unwrap();
         let agent = &locked.store.agents[&identity.agent_id];
         assert_eq!(agent.status_source, StatusSource::Hook);
         assert_eq!(agent.status, Status::Done);
@@ -337,7 +341,7 @@ mod tests {
         let mut fake = fake(dir.path());
         fake.replace = true;
         let identity = fake.seed();
-        let snapshot = scan(dir.path(), &fake.deps()).unwrap();
+        let snapshot = scan(&fake.deps()).unwrap();
         assert_eq!(
             snapshot
                 .agents
@@ -363,14 +367,14 @@ mod tests {
         fake.fail = true;
         let identity = fake.seed();
         {
-            let mut locked = LockedStore::open(dir.path()).unwrap();
+            let mut locked = crate::repository::at(dir.path()).begin().unwrap();
             let agent = locked.store.agents.get_mut(&identity.agent_id).unwrap();
             agent.status = Status::Working;
             agent.idle_confirmations = 2;
-            locked.save().unwrap();
+            locked.commit().unwrap();
         }
-        scan(dir.path(), &fake.deps()).unwrap();
-        let locked = LockedStore::open(dir.path()).unwrap();
+        scan(&fake.deps()).unwrap();
+        let locked = crate::repository::at(dir.path()).begin().unwrap();
         let agent = &locked.store.agents[&identity.agent_id];
         assert_eq!(agent.status, Status::Working);
         assert_eq!(agent.idle_confirmations, 0);

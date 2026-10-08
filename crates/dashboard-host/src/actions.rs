@@ -2,7 +2,7 @@ use crate::{
     command::{self, CommandSpec},
     host::{pane_id, pane_number, HostDependencies},
     process,
-    storage::{now_ms, LockedStore},
+    repository::now_ms,
     terminal::{NewPane, SessionId},
 };
 use dashboard_core::{
@@ -49,11 +49,11 @@ fn executable(name: &str) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("{name} 실행 파일을 찾을 수 없습니다"))
 }
 
-pub fn catalog(dir: &Path, deps: &HostDependencies) -> Result<Catalog, String> {
-    let locked = LockedStore::open(dir)?;
+pub fn catalog(deps: &HostDependencies) -> Result<Catalog, String> {
+    let store = deps.repository.read()?;
     let inventory = process::inventory(deps.runner)?;
-    let mut directories = locked.store.recent_directories.clone();
-    directories.extend(locked.store.agents.values().map(|a| a.cwd.clone()));
+    let mut directories = store.recent_directories.clone();
+    directories.extend(store.agents.values().map(|a| a.cwd.clone()));
     if let Ok(bytes) = command::output(
         deps.runner,
         CommandSpec::new("zoxide", Some(Duration::from_millis(500)), 128 * 1024)
@@ -114,13 +114,14 @@ pub fn link_launches(store: &mut dashboard_core::Store, inventory: &process::Inv
     }
 }
 
-fn checked(dir: &Path, target: &Identity, deps: &HostDependencies) -> Result<Agent, String> {
-    let mut locked = LockedStore::open(dir)?;
+fn checked(target: &Identity, deps: &HostDependencies) -> Result<Agent, String> {
+    let inventory_at = now_ms();
     let inventory = process::inventory(deps.runner)?;
-    locked.store.reconcile(&inventory.found, now_ms());
+    let mut locked = deps.repository.begin()?;
+    locked.store.reconcile(&inventory.found, inventory_at);
     link_launches(&mut locked.store, &inventory);
     locked.store.validate_target(target)?;
-    locked.save()?;
+    locked.commit()?;
     Ok(locked.store.agents[&target.agent_id].clone())
 }
 
@@ -155,7 +156,6 @@ struct LaunchTarget<'a> {
 }
 
 fn launch(
-    dir: &Path,
     request: &ActionRequest,
     target: LaunchTarget<'_>,
     deps: &HostDependencies,
@@ -179,11 +179,11 @@ fn launch(
         return Err("Zellij session changed or exited".into());
     }
     if let Some(parent) = parent {
-        checked(dir, parent, deps)?;
+        checked(parent, deps)?;
     }
     let directory = path.to_string_lossy().to_string();
     {
-        let mut locked = LockedStore::open(dir)?;
+        let mut locked = deps.repository.begin()?;
         locked.store.launches.insert(
             request.request_id.clone(),
             LaunchInfo {
@@ -196,7 +196,7 @@ fn launch(
                 agent_id: None,
             },
         );
-        locked.save()?;
+        locked.commit()?;
     }
     let marker = format!("ZAD_LAUNCH_ID={}", request.request_id);
     let pane = pane_number(&deps.terminal.new_pane(
@@ -214,7 +214,7 @@ fn launch(
             args: vec![marker.into(), exe.into_os_string()],
         },
     )?)?;
-    let mut locked = LockedStore::open(dir)?;
+    let mut locked = deps.repository.begin()?;
     locked
         .store
         .launches
@@ -222,11 +222,11 @@ fn launch(
         .unwrap()
         .pane_id = Some(pane);
     locked.store.remember_directory(&directory);
-    locked.save()?;
+    locked.commit()?;
     Ok((format!("{tool} 실행 완료"), Some(pane), directory))
 }
 
-fn send(dir: &Path, target: &Identity, text: &str, deps: &HostDependencies) -> Result<(), String> {
+fn send(target: &Identity, text: &str, deps: &HostDependencies) -> Result<(), String> {
     if text.trim().is_empty()
         || text.len() > 64 * 1024
         || text
@@ -235,15 +235,15 @@ fn send(dir: &Path, target: &Identity, text: &str, deps: &HostDependencies) -> R
     {
         return Err("입력은 64 KiB 이하의 텍스트여야 합니다".into());
     }
-    checked(dir, target, deps)?;
+    checked(target, deps)?;
     // Paste preserves multiline instructions. Delivery failures are uncertain.
     let paste = format!("\x1b[200~{text}\x1b[201~");
     let session = SessionId(target.session_name.clone());
     let pane = pane_id(target.pane_id);
     deps.terminal.write_text(&session, &pane, &paste)?;
-    checked(dir, target, deps)?;
+    checked(target, deps)?;
     deps.terminal.write_bytes(&session, &pane, &[13])?;
-    let mut locked = LockedStore::open(dir)?;
+    let mut locked = deps.repository.begin()?;
     let at = now_ms();
     locked.store.validate_target(target)?;
     locked.store.apply_signal(&StateSignal::Instruction {
@@ -251,7 +251,7 @@ fn send(dir: &Path, target: &Identity, text: &str, deps: &HostDependencies) -> R
         observed_at_ms: at,
         text: text.into(),
     })?;
-    locked.save()
+    locked.commit()
 }
 
 fn execute(
@@ -261,25 +261,25 @@ fn execute(
 ) -> Result<(String, Option<u32>, String), String> {
     match &request.action {
         Action::Input { target, text } => {
-            send(dir, target, text, deps)?;
+            send(target, text, deps)?;
             Ok(("입력 전송 완료".into(), None, String::new()))
         }
         Action::Alias { target, alias } => {
             if alias.len() > 120 || alias.chars().any(char::is_control) {
                 return Err("한 줄 태그를 입력해주세요 (120 bytes 이하)".into());
             }
-            checked(dir, target, deps)?;
-            let mut locked = LockedStore::open(dir)?;
+            checked(target, deps)?;
+            let mut locked = deps.repository.begin()?;
             locked.store.validate_target(target)?;
             locked.store.agents.get_mut(&target.agent_id).unwrap().alias = alias.trim().into();
             locked.store.revision += 1;
-            locked.save()?;
+            locked.commit()?;
             Ok(("태그 저장 완료".into(), None, String::new()))
         }
         Action::Close { target } => {
-            checked(dir, target, deps)?;
+            checked(target, deps)?;
             // Serialize pin settings through the final protection check/close.
-            let mut locked = LockedStore::open(dir)?;
+            let mut locked = deps.repository.begin()?;
             locked.store.validate_target(target)?;
             let mut id = Some(target.agent_id.as_str());
             let mut seen = std::collections::BTreeSet::new();
@@ -303,7 +303,7 @@ fn execute(
             agent.ended = true;
             agent.liveness = Liveness::Gone;
             locked.store.revision += 1;
-            locked.save()?;
+            locked.commit()?;
             Ok(("pane 종료 완료".into(), None, String::new()))
         }
         Action::Launch {
@@ -312,7 +312,6 @@ fn execute(
             cwd,
             tool,
         } => launch(
-            dir,
             request,
             LaunchTarget {
                 session,
@@ -328,7 +327,7 @@ fn execute(
             branch,
             tool,
         } => {
-            let agent = checked(dir, parent, deps)?;
+            let agent = checked(parent, deps)?;
             let root = cwd(&git(
                 Path::new(&agent.cwd),
                 &["rev-parse", "--show-toplevel"],
@@ -356,14 +355,14 @@ fn execute(
                     root.file_name().unwrap_or_default().to_string_lossy(),
                     name
                 ));
-            let mut locked = LockedStore::open(dir)?;
+            let mut locked = deps.repository.begin()?;
             locked
                 .store
                 .requests
                 .get_mut(&request.request_id)
                 .unwrap()
                 .path = path.to_string_lossy().into();
-            locked.save()?;
+            locked.commit()?;
             drop(locked);
             git(
                 &root,
@@ -379,7 +378,6 @@ fn execute(
                 deps,
             )?;
             launch(
-                dir,
                 request,
                 LaunchTarget {
                     session: &parent.session_name,
@@ -392,7 +390,7 @@ fn execute(
             )
         }
         Action::Lazygit { target } => {
-            let agent = checked(dir, target, deps)?;
+            let agent = checked(target, deps)?;
             let exe = executable("lazygit")?;
             let pane = pane_number(&deps.terminal.new_pane(
                 &SessionId(target.session_name.clone()),
@@ -409,7 +407,7 @@ fn execute(
             Ok(("lazygit 실행 완료".into(), Some(pane), String::new()))
         }
         Action::Editor { target, text } => {
-            let agent = checked(dir, target, deps)?;
+            let agent = checked(target, deps)?;
             let path = dir.join(format!("edit-{}.txt", uuid::Uuid::new_v4()));
             fs::write(&path, text).map_err(|e| e.to_string())?;
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
@@ -446,13 +444,12 @@ fn execute(
             parent,
             command: shell,
         } => {
-            checked(dir, parent, deps)?;
+            checked(parent, deps)?;
             if shell.trim().is_empty() || shell.len() > 64 * 1024 {
                 return Err("셸 명령어를 입력하세요".into());
             }
-            let locked = LockedStore::open(dir)?;
-            let children: Vec<_> = locked
-                .store
+            let store = deps.repository.read()?;
+            let children: Vec<_> = store
                 .agents
                 .values()
                 .filter(|a| {
@@ -460,14 +457,14 @@ fn execute(
                 })
                 .cloned()
                 .collect();
-            drop(locked);
+            drop(store);
             let mut results = Vec::new();
             let mut paths = std::collections::BTreeSet::new();
             for child in children {
                 if !paths.insert(child.cwd.clone()) {
                     continue;
                 }
-                checked(dir, &child.identity, deps)?;
+                checked(&child.identity, deps)?;
                 let mut spec =
                     CommandSpec::new("/bin/sh", Some(Duration::from_secs(60)), 64 * 1024)
                         .args(["-lc", shell]);
@@ -488,8 +485,8 @@ fn execute(
             Ok((results.join("\n\n"), None, String::new()))
         }
         Action::Merge { parent, child } => {
-            let pa = checked(dir, parent, deps)?;
-            let ch = checked(dir, child, deps)?;
+            let pa = checked(parent, deps)?;
+            let ch = checked(child, deps)?;
             if ch.parent_id.as_ref() != Some(&parent.agent_id) {
                 return Err("선택한 에이전트는 직접 자식이 아닙니다".into());
             }
@@ -502,7 +499,7 @@ fn execute(
             }
             let branch = git(Path::new(&ch.cwd), &["branch", "--show-current"], deps)?;
             let instruction=format!("자식 worktree {}의 작업을 검토하고 현재 브랜치에 병합해주세요.\n자식 경로: {}\n자식 브랜치: {}\n충돌과 테스트 결과를 확인하고 처리 결과를 보고해주세요.",ch.project(),ch.cwd,branch);
-            send(dir, parent, &instruction, deps)?;
+            send(parent, &instruction, deps)?;
             Ok(("부모에게 병합 지시 전송 완료".into(), None, String::new()))
         }
     }
@@ -514,17 +511,18 @@ pub fn action(
     deps: &HostDependencies,
 ) -> Result<ActionResult, String> {
     {
-        let mut locked = LockedStore::open(dir)?;
+        let inventory_at = now_ms();
         let inventory = process::inventory(deps.runner)?;
-        locked.store.reconcile(&inventory.found, now_ms());
+        let mut locked = deps.repository.begin()?;
+        locked.store.reconcile(&inventory.found, inventory_at);
         link_launches(&mut locked.store, &inventory);
         if !locked.store.claim(&request, now_ms())? {
             return Ok(locked.store.requests[&request.request_id].clone());
         }
-        locked.save()?;
+        locked.commit()?;
     }
     let result = execute(dir, &request, deps);
-    let mut locked = LockedStore::open(dir)?;
+    let mut locked = deps.repository.begin()?;
     let record = locked
         .store
         .requests
@@ -548,22 +546,24 @@ pub fn action(
     }
     let response = record.clone();
     locked.store.revision += 1;
-    locked.save()?;
+    locked.commit()?;
     Ok(response)
 }
 
-pub fn result(dir: &Path, id: &str) -> Result<ActionResult, String> {
-    let locked = LockedStore::open(dir)?;
-    locked
-        .store
+pub fn result(
+    repository: &dyn crate::repository::Repository,
+    id: &str,
+) -> Result<ActionResult, String> {
+    let store = repository.read()?;
+    store
         .requests
         .get(id)
         .cloned()
         .ok_or("unknown request ID".into())
 }
 
-pub fn edited(dir: &Path, id: &str, deps: &HostDependencies) -> Result<serde_json::Value, String> {
-    let result = result(dir, id)?;
+pub fn edited(id: &str, deps: &HostDependencies) -> Result<serde_json::Value, String> {
+    let result = result(deps.repository, id)?;
     let Action::Editor { target, .. } = &result.request.action else {
         return Err("request is not an editor action".into());
     };
@@ -610,11 +610,12 @@ mod tests {
             format!("10 1 Mon Oct 5 10:00:00 2026 zellij --server /tmp/dev\n20 10 Mon Oct 5 {started} 2026 /bin/codex ZELLIJ_SESSION_NAME=dev ZELLIJ_PANE_ID=7 PWD=/tmp\n{} 1 Mon Oct 5 10:00:00 2026 /bin/test\n", std::process::id())
         }
         fn seed(&self, dir: &Path) -> Identity {
+            let inventory_at = now_ms();
             let inventory = process::parse_inventory(&self.inventory_text()).unwrap();
             let target = inventory.found[0].identity.clone();
-            let mut locked = LockedStore::open(dir).unwrap();
-            locked.store.reconcile(&inventory.found, now_ms());
-            locked.save().unwrap();
+            let mut locked = crate::repository::at(dir).begin().unwrap();
+            locked.store.reconcile(&inventory.found, inventory_at);
+            locked.commit().unwrap();
             target
         }
     }
@@ -684,7 +685,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let fake = FakeHost::default();
         let target = fake.seed(directory.path());
+        let repository = crate::repository::at(directory.path());
         let deps = HostDependencies {
+            repository: repository.as_ref(),
             runner: &fake,
             terminal: &fake,
         };
@@ -717,7 +720,9 @@ mod tests {
         let fake = FakeHost::default();
         fake.change_after_paste.set(true);
         let target = fake.seed(directory.path());
+        let repository = crate::repository::at(directory.path());
         let deps = HostDependencies {
+            repository: repository.as_ref(),
             runner: &fake,
             terminal: &fake,
         };
@@ -747,11 +752,13 @@ mod tests {
         let fake = FakeHost::default();
         let target = fake.seed(directory.path());
         {
-            let mut locked = LockedStore::open(directory.path()).unwrap();
+            let mut locked = crate::repository::at(directory.path()).begin().unwrap();
             locked.store.set_pinned(&target.agent_id, true).unwrap();
-            locked.save().unwrap();
+            locked.commit().unwrap();
         }
+        let repository = crate::repository::at(directory.path());
         let deps = HostDependencies {
+            repository: repository.as_ref(),
             runner: &fake,
             terminal: &fake,
         };

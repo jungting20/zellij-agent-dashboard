@@ -33,6 +33,8 @@ export ZAD_STATE_DIR="$PWD/.local/state"
 ./scripts/dashboard.sh SESSION_NAME
 ```
 
+상태는 기본적으로 `${XDG_STATE_HOME:-$HOME/.local/state}/zellij-agent-dashboard/store.sqlite3`에 저장한다. Repository 계층을 통해 SQLite를 사용하며 네이티브 host에 SQLite 라이브러리를 포함하므로 별도 DB 서버나 SQLite CLI 설치는 필요하지 않다. 기존 `store.json`은 최초 실행에 자동 이관하고 원본을 보존한다. 업그레이드 전에 이전 host를 사용하는 collector와 훅을 중단한다. 백업·복구와 버전 정책은 [공유 상태 문서](docs/architecture.md#공유-상태와-동시성)를 참고한다.
+
 화면 키는 `j/k`, 방향키, 숫자 `1–9` 선택, `/` 검색, `R` 새로고침, `Enter` pane 이동, `q` 닫기다. `Tab`은 저장된 고정 항목만 필터링한다. 고정 변경과 별칭 편집은 다음 구현 단계다.
 
 Claude, Codex, Cursor CLI(`agent`), Gemini 프로필(`agy`), Hermes 실행 파일을 발견한다. 상세 훅 어댑터는 현재 Claude만 제공한다. Claude, Codex, Gemini, Cursor는 훅이 없으면 화면 규칙으로 상태를 판별한다. Hermes는 화면 규칙이 없어 `found`로 표시하며 Pi 탐지는 아직 추가하지 않았다. 훅 없는 경로 정보는 프로세스가 상속한 `PWD`를 사용한다.
@@ -68,7 +70,7 @@ smoke 검증은 이름이 무작위인 전용 임시 세션만 만들고 종료�
 
 Rust와 Zellij `0.45.0`에 맞춘 `zellij-tile`로 WASI 실행 파일을 만든다. 하나의 플러그인 바이너리가 설정에 따라 `collector`와 `dashboard` 역할로 실행된다.
 
-Zellij 서버가 수집기의 실행 기반이다. 수집기는 2초마다 유한한 호스트 명령을 실행하고 공유 JSON 저장소를 갱신한다. 여러 수집기의 쓰기는 호스트 파일 잠금으로 직렬화하고 프로세스 스캔은 공유 주기로 제한한다. 모든 수집기 세션이 종료되면 수집도 중단되고, 다음 실행에서 저장 상태와 실제 프로세스를 대조해 복원한다.
+Zellij 서버가 수집기의 실행 기반이다. 수집기는 2초마다 유한한 호스트 명령을 실행하고 공유 SQLite 저장소를 갱신한다. 여러 수집기의 쓰기는 SQLite 트랜잭션으로 직렬화하고 프로세스 스캔은 공유 주기로 제한한다. 모든 수집기 세션이 종료되면 수집도 중단되고, 다음 실행에서 저장 상태와 실제 프로세스를 대조해 복원한다.
 
 프로세스 탐지와 파일 갱신에 호스트 프로그램이 필요하면 요청 하나를 처리하고 종료하는 보조 명령을 사용한다. 기존 `agentd` 또는 `zellij-agent daemon serve`에 연결하지 않는다.
 
