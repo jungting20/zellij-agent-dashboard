@@ -38,15 +38,17 @@ collector는 시작 권한을 받은 뒤 화면에서 숨겨진다. 대시보드
 
 기본 저장 위치는 `${XDG_STATE_HOME:-$HOME/.local/state}/zellij-agent-dashboard`이며 파일명은 `store.sqlite3`다. 실행 스크립트의 `ZAD_STATE_DIR`와 호스트의 `--state-dir`로 경로를 지정할 수 있다. SQLite는 네이티브 host에만 포함하며 플러그인은 기존 JSON 명령 응답을 사용한다. 별도 서버나 영구 연결을 추가하지 않는다.
 
-`Repository::read()`는 하나의 읽기 트랜잭션에서 일관된 `Store` 스냅샷을 반환한다. `Repository::begin()`은 갱신용 `UnitOfWork`를 반환하며 `commit()` 없이 종료하면 롤백한다. 호출부에는 `HostDependencies`로 Repository를 주입한다. 상태 전이·출처 선택·실행 세대 검증은 Rust 코어에 남고 SQL, 연결, 파일 권한과 이관은 호스트 어댑터에 둔다. 편집기에서 사용하는 `edit-*.txt`는 외부 에디터용 파일이므로 DB 상태와 별도로 유지한다.
+`Repository`는 snapshot, agent, request, recent_requests, catalog, runtime의 용도별 조회를 제공한다. snapshot은 메타데이터·에이전트·활동만 읽으며 요청 이력을 읽지 않는다. agent와 request는 지정한 ID를 조회하고 recent_requests는 시각 내림차순·ID 오름차순 인덱스로 제한된 개수를 읽는다. 각 조회는 하나의 읽기 트랜잭션에서 일관된 결과를 반환한다. 전체 `read()`는 이관·검증용으로 유지한다. `Repository::begin()`은 갱신용 `UnitOfWork`를 반환하며 `commit()` 없이 종료하면 롤백한다. 호출부에는 `HostDependencies`로 Repository를 주입한다. 상태 전이·출처 선택·실행 세대 검증은 Rust 코어에 남고 SQL, 연결, 파일 권한과 이관은 호스트 어댑터에 둔다. 편집기에서 사용하는 `edit-*.txt`는 외부 에디터용 파일이므로 DB 상태와 별도로 유지한다.
 
-DB는 `metadata`, `agents`, `activities`, `requests`, `launches`, `recent_directories` 테이블을 사용한다. 식별자/순서를 키로 삼고 각 레코드의 내용은 JSON 컬럼에 보존한다. 코어의 전체 스냅샷을 읽어 전이한 뒤 변경된 레코드만 추가·갱신·삭제한다. 현재 조회는 전체 스냅샷이며 SQL 조건별 조회는 제공하지 않는다. `metadata`는 revision, 마지막 스캔 시점, 수집 예약과 도메인 스키마를 포함한다.
+DB는 `metadata`, `agents`, `activities`, `requests`, `launches`, `recent_directories` 테이블을 사용한다. 식별자/순서를 키로 삼고 각 레코드의 내용은 JSON 컬럼에 보존한다. 코어의 전체 스냅샷을 읽어 전이한 뒤 변경된 레코드만 추가·갱신·삭제한다. 요청 테이블에는 정렬용 `at_ms` 컬럼과 `requests_recent` 인덱스를 두며 JSON의 시각과 함께 갱신한다. 갱신 트랜잭션은 현재 전체 Store 비교 방식을 유지한다. 부분 조회 결과는 이 저장 경로에 전달하지 않는다. `metadata`는 revision, 마지막 스캔 시점, 수집 예약과 도메인 스키마를 포함한다.
 
 WAL과 `synchronous=FULL`을 사용한다. 조회는 작성자 예약 없이 수행하며 갱신은 `BEGIN IMMEDIATE`로 직렬화한다. SQLite 잠금 대기와 초기 WAL 설정의 BUSY 재시도는 각각 최대 2초다. 여러 세션·클라이언트의 collector가 같은 DB를 사용하며 별도의 작성자 선출을 두지 않는다. 상태 디렉터리는 로컬 파일시스템에 둔다. [SQLite WAL 문서](https://www.sqlite.org/wal.html)
 
 공유 마지막 스캔 시점으로 프로세스 탐지를 1.8초 이상 간격으로 제한한다. `scan_lease`의 토큰과 10초 만료 시각으로 중복 collector의 동시 수집을 제한한다. 실패 시 자신의 예약을 해제하고, helper 중단 시 만료 후 다음 collector가 이어받는다. 메타데이터·화면·프로세스 읽기는 갱신 트랜잭션 밖에서 수행하고, 화면 조회 후 프로세스 전체 목록을 다시 확인한다. 만료되거나 교체된 예약의 결과는 저장하지 않는다. 훅은 갱신 트랜잭션 안에서 현재 실행 ID를 확인하고 순서 번호를 부여해 반영한다. 종료 조작의 마지막 고정 보호 검사와 pane 종료는 기존과 같이 직렬화한다.
 
-저장소 디렉터리는 700, DB와 WAL 보조 파일은 600 권한이다. DB 구조 버전은 SQLite `user_version=1`이고 도메인 Store와 스냅샷 스키마는 3, 이벤트 JSON은 1을 유지한다. 도메인 스키마와 DB 구조 버전은 별도로 관리한다. 손상된 DB, 알 수 없는 DB 구조 버전, 더 새로운 도메인 스키마는 재초기화하거나 덮어쓰지 않고 오류를 반환한다.
+저장소 디렉터리는 700, DB와 WAL 보조 파일은 600 권한이다. DB 구조 버전은 SQLite `user_version=2`이고 도메인 Store와 스냅샷 스키마는 3, 이벤트 JSON은 1을 유지한다. 도메인 스키마와 DB 구조 버전은 별도로 관리한다. 손상된 DB, 알 수 없는 DB 구조 버전, 더 새로운 도메인 스키마는 재초기화하거나 덮어쓰지 않고 오류를 반환한다.
+
+DB 구조 버전 1은 작성자 트랜잭션에서 요청의 `at_ms` 컬럼을 추가하고 기존 JSON 시각을 채운 뒤 인덱스를 생성해 2로 이관한다. 도메인 버전과 요청 JSON이 유효한지 확인하며 실패하면 컬럼·인덱스·버전 변경을 롤백하고 기존 내용을 보존한다. 동시 이관은 잠금 안에서 버전을 재확인한다. DB 버전 1 바이너리로 롤백하려면 이관 전 DB 백업을 복원한다. 이 변경에서 도메인·스냅샷·이벤트 JSON 버전은 올리지 않는다.
 
 DB 최초 초기화 시 같은 디렉터리의 `store.json`을 읽어 하나의 트랜잭션으로 이관한다. JSON이 없으면 `Store::default()`로 시작한다. 동시 초기화는 작성자 잠금 안에서 버전을 재확인해 이관을 한 번만 수행한다. JSON과 기존 `store.lock`은 보존하며 성공 이후에는 SQLite만 기준으로 사용한다. 이관 실패는 테이블과 버전 갱신까지 롤백하고 원본 JSON을 유지한다. 기존 JSON 스키마 1은 출처 이관을 거쳐 3으로, 스키마 2는 pane 확인 정보의 기본값을 추가해 3으로 변환한다. 기존 pane 제목만으로 현재 존재를 확정하지 않으며 `pane.presence=unknown`, `pane.observed_at_ms=0`으로 시작한다. DB에 저장된 스키마 2도 읽을 때 자동 이관하고 다음 쓰기에 3으로 저장한다. 이전 바이너리는 스키마 3을 거부하므로 host와 플러그인을 함께 갱신하고, 롤백은 업그레이드 전 DB 백업을 사용한다. 순서가 있는 실행의 상태·보고 시각·훅 출처를 보존하고 순서가 없는 발견 실행은 화면 감지를 시작한다. 수집 예약의 기본값은 없음이다. 참고 프로젝트에서 사용하던 SQLite DB는 읽지 않는다.
 

@@ -50,10 +50,10 @@ fn executable(name: &str) -> Result<PathBuf, String> {
 }
 
 pub fn catalog(deps: &HostDependencies) -> Result<Catalog, String> {
-    let store = deps.repository.read()?;
+    let store = deps.repository.catalog()?;
     let inventory = process::inventory(deps.runner)?;
-    let mut directories = store.recent_directories.clone();
-    directories.extend(store.agents.values().map(|a| a.cwd.clone()));
+    let mut directories = store.directories;
+    directories.extend(store.agents.iter().map(|a| a.cwd.clone()));
     if let Ok(bytes) = command::output(
         deps.runner,
         CommandSpec::new("zoxide", Some(Duration::from_millis(500)), 128 * 1024)
@@ -112,13 +112,8 @@ fn checked(target: &Identity, deps: &HostDependencies) -> Result<Agent, String> 
 }
 
 pub fn resolve(id: &str, deps: &HostDependencies) -> Result<Agent, String> {
-    let store = deps.repository.read()?;
-    let identity = &store
-        .agents
-        .get(id)
-        .ok_or("agent no longer exists")?
-        .identity;
-    checked(identity, deps)
+    let agent = deps.repository.agent(id)?.ok_or("agent no longer exists")?;
+    checked(&agent.identity, deps)
 }
 
 fn cwd(value: &str) -> Result<PathBuf, String> {
@@ -414,7 +409,7 @@ fn execute(
             if shell.trim().is_empty() || shell.len() > 64 * 1024 {
                 return Err("셸 명령어를 입력하세요".into());
             }
-            let store = deps.repository.read()?;
+            let store = deps.repository.runtime()?;
             let children: Vec<_> = store
                 .agents
                 .values()
@@ -453,7 +448,7 @@ fn execute(
         Action::Merge { parent, child } => {
             checked(parent, deps)?;
             let ch = checked(child, deps)?;
-            deps.repository.read()?.validate_merge(parent, child)?;
+            deps.repository.runtime()?.validate_merge(parent, child)?;
             let branch = git(Path::new(&ch.cwd), &["branch", "--show-current"], deps)?;
             let instruction=format!("자식 worktree {}의 작업을 검토하고 현재 브랜치에 병합해주세요.\n자식 경로: {}\n자식 브랜치: {}\n충돌과 테스트 결과를 확인하고 처리 결과를 보고해주세요.",ch.project(),ch.cwd,branch);
             send(parent, &instruction, deps)?;
@@ -507,12 +502,7 @@ pub fn result(
     repository: &dyn crate::repository::Repository,
     id: &str,
 ) -> Result<ActionResult, String> {
-    let store = repository.read()?;
-    store
-        .requests
-        .get(id)
-        .cloned()
-        .ok_or("unknown request ID".into())
+    repository.request(id)?.ok_or("unknown request ID".into())
 }
 
 pub fn edited(id: &str, deps: &HostDependencies) -> Result<serde_json::Value, String> {

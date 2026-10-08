@@ -83,13 +83,7 @@ fn run(
     };
     let command = args.first().map(String::as_str).unwrap_or("help");
     match command {
-        "requests" => {
-            let store = deps.repository.read()?;
-            let mut records: Vec<_> = store.requests.values().cloned().collect();
-            records.sort_by_key(|r| std::cmp::Reverse(r.at_ms));
-            records.truncate(50);
-            json(&records)
-        }
+        "requests" => json(&deps.repository.recent_requests(50)?),
         "catalog" => json(&actions::catalog(deps)?),
         "action" => {
             let request = serde_json::from_str(args.get(1).ok_or("action requires JSON request")?)
@@ -121,10 +115,7 @@ fn run(
             hook(deps)
         }
         "scan" => json(&collector::scan(deps)?),
-        "snapshot" => {
-            let store = deps.repository.read()?;
-            json(&store.snapshot(now_ms()))
-        }
+        "snapshot" => json(&deps.repository.snapshot(now_ms())?),
         "pin" => {
             let id = args.get(1).ok_or("pin requires an agent ID")?;
             let pinned = args
@@ -142,14 +133,7 @@ fn run(
         }
         "preview" => {
             let id = args.get(1).ok_or("preview requires an agent ID")?;
-            let agent = {
-                let store = deps.repository.read()?;
-                store
-                    .agents
-                    .get(id)
-                    .cloned()
-                    .ok_or("agent no longer exists")?
-            };
+            let agent = deps.repository.agent(id)?.ok_or("agent no longer exists")?;
             json(&panes::preview(&agent, deps)?)
         }
         "resolve" => json(&actions::resolve(

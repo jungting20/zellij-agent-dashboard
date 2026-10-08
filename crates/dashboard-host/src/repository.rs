@@ -1,10 +1,41 @@
 //! Persistence boundary. Domain transitions stay in dashboard-core.
-use dashboard_core::Store;
+use dashboard_core::{ActionResult, Agent, Snapshot, Store};
 use std::path::Path;
+
+pub struct CatalogState {
+    pub directories: Vec<String>,
+    pub agents: Vec<Agent>,
+}
 
 pub trait Repository {
     /// Return one consistent committed snapshot without a writer lock.
     fn read(&self) -> Result<Store, String>;
+    fn snapshot(&self, at: u64) -> Result<Snapshot, String> {
+        Ok(self.read()?.snapshot(at))
+    }
+    fn agent(&self, id: &str) -> Result<Option<Agent>, String> {
+        Ok(self.read()?.agents.get(id).cloned())
+    }
+    fn request(&self, id: &str) -> Result<Option<ActionResult>, String> {
+        Ok(self.read()?.requests.get(id).cloned())
+    }
+    fn recent_requests(&self, limit: usize) -> Result<Vec<ActionResult>, String> {
+        let mut records: Vec<_> = self.read()?.requests.values().cloned().collect();
+        records.sort_by_key(|record| std::cmp::Reverse(record.at_ms));
+        records.truncate(limit);
+        Ok(records)
+    }
+    fn catalog(&self) -> Result<CatalogState, String> {
+        let store = self.read()?;
+        Ok(CatalogState {
+            directories: store.recent_directories.clone(),
+            agents: store.agents.values().cloned().collect(),
+        })
+    }
+    /// Runtime observations and relationships, excluding request history.
+    fn runtime(&self) -> Result<Store, String> {
+        self.read()
+    }
     /// Serialize read-modify-write operations until commit or drop.
     fn begin(&self) -> Result<UnitOfWork, String>;
 }

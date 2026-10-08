@@ -392,7 +392,7 @@ fn main() {
         assert (state / "store.json").read_bytes() == legacy_bytes
         with sqlite3.connect(state / "store.sqlite3") as database:
             assert database.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-            assert database.execute("PRAGMA user_version").fetchone()[0] == 1
+            assert database.execute("PRAGMA user_version").fetchone()[0] == 2
             assert database.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
             metadata = json.loads(database.execute("SELECT body FROM metadata WHERE id='store'").fetchone()[0])
             assert metadata["revision"] >= 17
