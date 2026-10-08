@@ -15,10 +15,13 @@ Zellij collector ── 2초 타이머 ── dashboard-host scan
                                        │
 Zellij dashboard ─────────────── dashboard-host snapshot
        │
-       └── Enter ── dashboard-host resolve ── 실행 세대 확인 ── pane 이동
+       ├── Enter ── dashboard-host resolve ── 실행 세대 확인 ── pane 이동
+       └── 조작 ── dashboard-host action ── 요청 저장 ── 호스트 조작 ── 결과 저장
 ```
 
 `dashboard-core`는 공통 `StateSignal`, 상태 전이와 화면 모델을 담당한다. `dashboard-host`의 도구별 어댑터는 Claude 훅 JSON과 pane 화면을 공통 신호로 정규화한다. 외부 수집과 저장은 host에 남는다. `dashboard-plugin`은 같은 WASI 실행 파일을 `mode=collector`와 `mode=dashboard` 설정으로 사용한다. 파일 경로는 WASI 마운트 경로로 변환하지 않고 네이티브 보조 명령에 절대 경로로 전달한다.
+
+`Store`의 실시간 상태는 외부에서 읽기만 가능하며 `DerefMut`을 제공하지 않는다. 별칭·종료 보호/결과·부모 연결·요청 결과·pane/cwd·화면 조회 시각·수집 예약은 코어 메서드로 변경한다. 호스트는 외부 사실을 정규화하고 조작 결과를 전달한다. 종료 보호는 접수와 실행 직전에 같은 코어 규칙으로 검사하며, 실행 직전 검사는 저장소 트랜잭션 안에서 pane 종료까지 직렬화한다. `StoreData`는 저장 표현이며 정상 조회는 `Store::loaded()`로 복원하고, 전체 데이터 교체는 명시적인 `Store::restore()`로 구분한다.
 
 collector는 시작 권한을 받은 뒤 화면에서 숨겨진다. 대시보드 화면을 닫거나 클라이언트가 detach해도 타이머 수집이 남는다. 모든 수집기 세션을 종료하면 주기적 탐지도 멈춘다. 연결된 Claude 훅 자체는 저장소를 직접 갱신할 수 있다.
 
@@ -38,9 +41,20 @@ collector는 시작 권한을 받은 뒤 화면에서 숨겨진다. 대시보드
 
 기본 저장 위치는 `${XDG_STATE_HOME:-$HOME/.local/state}/zellij-agent-dashboard`이며 파일명은 `store.sqlite3`다. 실행 스크립트의 `ZAD_STATE_DIR`와 호스트의 `--state-dir`로 경로를 지정할 수 있다. SQLite는 네이티브 host에만 포함하며 플러그인은 기존 JSON 명령 응답을 사용한다. 별도 서버나 영구 연결을 추가하지 않는다.
 
-`Repository`는 snapshot, agent, request, recent_requests, catalog, runtime의 용도별 조회를 제공한다. snapshot은 메타데이터·에이전트·활동만 읽으며 요청 이력을 읽지 않는다. agent와 request는 지정한 ID를 조회하고 recent_requests는 시각 내림차순·ID 오름차순 인덱스로 제한된 개수를 읽는다. 각 조회는 하나의 읽기 트랜잭션에서 일관된 결과를 반환한다. 전체 `read()`는 이관·검증용으로 유지한다. `Repository::begin()`은 갱신용 `UnitOfWork`를 반환하며 `commit()` 없이 종료하면 롤백한다. 호출부에는 `HostDependencies`로 Repository를 주입한다. 상태 전이·출처 선택·실행 세대 검증은 Rust 코어에 남고 SQL, 연결, 파일 권한과 이관은 호스트 어댑터에 둔다. 편집기에서 사용하는 `edit-*.txt`는 외부 에디터용 파일이므로 DB 상태와 별도로 유지한다.
+`Repository`는 snapshot, agent, request, recent_requests, catalog, runtime의 용도별 조회를 제공한다. snapshot은 메타데이터·에이전트·활동만 읽으며 요청 이력을 읽지 않는다. agent와 request는 지정한 ID를 조회하고 recent_requests는 시각 내림차순·ID 오름차순 인덱스로 제한된 개수를 읽는다. catalog는 최근 경로와 에이전트 정보를, runtime은 관측·부모 연결에 필요한 상태를 읽는다. 각 조회는 하나의 읽기 트랜잭션에서 일관된 결과를 반환한다. 전체 `read()`는 이관·검증용으로 유지한다. 호출부에는 `HostDependencies`로 Repository를 주입한다. 상태 전이·출처 선택·실행 세대 검증은 Rust 코어에 두고 SQL, 연결, 파일 권한과 DB 이관은 호스트 어댑터에 둔다. 편집기의 `edit-*.txt`는 DB 상태와 별도로 유지한다.
 
-DB는 `metadata`, `agents`, `activities`, `requests`, `launches`, `recent_directories` 테이블을 사용한다. 식별자/순서를 키로 삼고 각 레코드의 내용은 JSON 컬럼에 보존한다. 코어의 전체 스냅샷을 읽어 전이한 뒤 변경된 레코드만 추가·갱신·삭제한다. 요청 테이블에는 정렬용 `at_ms` 컬럼과 `requests_recent` 인덱스를 두며 JSON의 시각과 함께 갱신한다. 갱신 트랜잭션은 현재 전체 Store 비교 방식을 유지한다. 부분 조회 결과는 이 저장 경로에 전달하지 않는다. `metadata`는 revision, 마지막 스캔 시점, 수집 예약과 도메인 스키마를 포함한다.
+갱신용 `UnitOfWork`는 `commit()` 없이 종료하면 롤백한다. 네이티브 SQLite 어댑터는 작업별로 다음 범위의 상태를 읽는다. 메모리 Repository 대역은 전체 읽기/트랜잭션으로도 같은 계약을 구현할 수 있다.
+
+| 진입점 | 용도와 읽는 상태 |
+|---|---|
+| `begin_runtime()` | 수집·훅·고정·별칭·대상 확인: 메타데이터·에이전트·활동·launch·최근 경로, 요청 이력 제외 |
+| `begin_action(id)` | 요청 접수: runtime 상태·해당 요청·SQL 전체 요청 개수, 기존 요청과 4,096개 한도 확인 |
+| `begin_request(id)` | 결과·launch·경로 기록: 메타데이터·해당 요청/launch·최근 경로, 도메인 이관이 필요할 때만 에이전트 추가 조회 |
+| `begin()` | 전체 복원과 저장소 검증을 위한 full 트랜잭션 |
+
+DB는 `metadata`, `agents`, `activities`, `requests`, `launches`, `recent_directories` 테이블을 사용한다. 식별자/순서를 키로 삼고 레코드 내용은 JSON 컬럼에 보존한다. 요청의 `at_ms` 컬럼과 `requests_recent` 인덱스는 JSON 시각과 함께 갱신한다. 코어는 변경된 agent/request/launch ID와 삭제한 agent ID, 메타데이터·활동·최근 경로 변경을 추적한다. SQLite는 이 변경분만 직렬화·저장하고 전체 Store 복제·JSON 비교를 하지 않는다. 활동과 최근 경로는 각각 최대 50개·100개의 목록 단위로 교체한다. 메타데이터는 컬렉션을 복제하지 않고 별도로 구성한다.
+
+부분 조회에서 읽지 않은 레코드는 삭제하지 않는다. 명시적 agent 정리만 ID를 지정해 삭제하며, 전체 교체는 full 트랜잭션에서만 허용한다. runtime 트랜잭션의 요청 변경과 지정 ID 밖의 요청 변경은 커밋 전에 거부한다. 요청 총개수는 접수 트랜잭션 안에서 읽으므로 동시 요청에도 한도를 유지한다. 변경 추적과 부분 조회 총개수는 메모리 정보이며 저장 JSON이나 외부 응답에 추가하지 않는다. `metadata`는 revision, 마지막 스캔 시점, 수집 예약과 도메인 스키마를 포함한다.
 
 WAL과 `synchronous=FULL`을 사용한다. 조회는 작성자 예약 없이 수행하며 갱신은 `BEGIN IMMEDIATE`로 직렬화한다. SQLite 잠금 대기와 초기 WAL 설정의 BUSY 재시도는 각각 최대 2초다. 여러 세션·클라이언트의 collector가 같은 DB를 사용하며 별도의 작성자 선출을 두지 않는다. 상태 디렉터리는 로컬 파일시스템에 둔다. [SQLite WAL 문서](https://www.sqlite.org/wal.html)
 
@@ -50,7 +64,7 @@ WAL과 `synchronous=FULL`을 사용한다. 조회는 작성자 예약 없이 수
 
 DB 구조 버전 1은 작성자 트랜잭션에서 요청의 `at_ms` 컬럼을 추가하고 기존 JSON 시각을 채운 뒤 인덱스를 생성해 2로 이관한다. 도메인 버전과 요청 JSON이 유효한지 확인하며 실패하면 컬럼·인덱스·버전 변경을 롤백하고 기존 내용을 보존한다. 동시 이관은 잠금 안에서 버전을 재확인한다. DB 버전 1 바이너리로 롤백하려면 이관 전 DB 백업을 복원한다. 이 변경에서 도메인·스냅샷·이벤트 JSON 버전은 올리지 않는다.
 
-DB 최초 초기화 시 같은 디렉터리의 `store.json`을 읽어 하나의 트랜잭션으로 이관한다. JSON이 없으면 `Store::default()`로 시작한다. 동시 초기화는 작성자 잠금 안에서 버전을 재확인해 이관을 한 번만 수행한다. JSON과 기존 `store.lock`은 보존하며 성공 이후에는 SQLite만 기준으로 사용한다. 이관 실패는 테이블과 버전 갱신까지 롤백하고 원본 JSON을 유지한다. 기존 JSON 스키마 1은 출처 이관을 거쳐 3으로, 스키마 2는 pane 확인 정보의 기본값을 추가해 3으로 변환한다. 기존 pane 제목만으로 현재 존재를 확정하지 않으며 `pane.presence=unknown`, `pane.observed_at_ms=0`으로 시작한다. DB에 저장된 스키마 2도 읽을 때 자동 이관하고 다음 쓰기에 3으로 저장한다. 이전 바이너리는 스키마 3을 거부하므로 host와 플러그인을 함께 갱신하고, 롤백은 업그레이드 전 DB 백업을 사용한다. 순서가 있는 실행의 상태·보고 시각·훅 출처를 보존하고 순서가 없는 발견 실행은 화면 감지를 시작한다. 수집 예약의 기본값은 없음이다. 참고 프로젝트에서 사용하던 SQLite DB는 읽지 않는다.
+DB 최초 초기화 시 같은 디렉터리의 `store.json`을 읽어 하나의 트랜잭션으로 이관한다. JSON이 없으면 `Store::default()`로 시작한다. 동시 초기화는 작성자 잠금 안에서 버전을 재확인해 이관을 한 번만 수행한다. JSON과 기존 `store.lock`은 보존하며 성공 이후에는 SQLite만 기준으로 사용한다. 이관 실패는 테이블과 버전 갱신까지 롤백하고 원본 JSON을 유지한다. 기존 JSON 스키마 1은 출처 이관을 거쳐 3으로, 스키마 2는 pane 확인 정보의 기본값을 추가해 3으로 변환한다. 기존 pane 제목만으로 현재 존재를 확정하지 않으며 `pane.presence=unknown`, `pane.observed_at_ms=0`으로 시작한다. DB에 저장된 스키마 2도 읽을 때 자동 이관하고 다음 쓰기에 3으로 저장한다. 도메인 스키마 1/2만 지원하던 이전 바이너리는 스키마 3을 거부하므로 host와 플러그인을 함께 갱신하고, 롤백은 업그레이드 전 DB 백업을 사용한다. 순서가 있는 실행의 상태·보고 시각·훅 출처를 보존하고 순서가 없는 발견 실행은 화면 감지를 시작한다. 수집 예약의 기본값은 없음이다. 참고 프로젝트에서 사용하던 SQLite DB는 읽지 않는다.
 
 업그레이드 전에 이전 host를 사용하는 collector와 훅 실행을 중단해야 한다. 구버전 JSON 작성자와 신버전 SQLite 작성자를 동시에 운영하지 않는다. 백업은 관련 collector와 훅을 중단한 뒤 상태 디렉터리 전체를 복사하거나 SQLite의 온라인 백업 도구로 수행한다. 실행 중 `store.sqlite3`만 복사하면 WAL의 최신 변경을 빠뜨릴 수 있다. 복구는 실행을 중단하고 DB와 `-wal`, `-shm`을 함께 백업·이동한 뒤 정상 DB를 복원한다. 정상 JSON으로 재이관하려면 DB 세 파일을 이동하고 JSON을 복원한 뒤 시작한다. 이전 바이너리로 롤백할 때는 보존한 JSON을 사용하며, 이관 이후 DB에서 발생한 변경은 그 JSON에 포함되지 않는다.
 
