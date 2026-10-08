@@ -1,6 +1,6 @@
 use crate::{
     text::{wrap, Line},
-    Agent, Liveness, PaneOutput, Snapshot, Status,
+    Agent, Liveness, PaneOutput, Snapshot, Status, StatusSource,
 };
 use std::collections::BTreeSet;
 use unicode_width::UnicodeWidthStr;
@@ -305,10 +305,15 @@ impl View {
                                 }
                             )
                         })
-                        .unwrap_or_else(|| "훅 보고 없음".into());
+                        .unwrap_or_else(|| "상태 보고 없음".into());
+                    let source = match a.status_source {
+                        StatusSource::Hook => "훅",
+                        StatusSource::Screen => "화면",
+                        StatusSource::Unknown => "미확인",
+                    };
                     format!(
-                        "{} · pane {} · {} · {}",
-                        a.identity.session_name, a.identity.pane_id, a.cwd, report
+                        "{} · pane {} · {} · {} · {}",
+                        a.identity.session_name, a.identity.pane_id, a.cwd, source, report
                     )
                 })
                 .unwrap_or_default()

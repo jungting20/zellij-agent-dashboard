@@ -1,0 +1,256 @@
+{
+  "version": 1,
+  "agent": "codex",
+  "rules": [
+    {
+      "id": "osc_title_blocked",
+      "priority": 1100,
+      "state": "blocked",
+      "region": {
+        "type": "osc_title"
+      },
+      "match": {
+        "contains": [
+          "Action Required"
+        ]
+      },
+      "visible_blocker": true
+    },
+    {
+      "id": "osc_title_working",
+      "priority": 1050,
+      "state": "working",
+      "region": {
+        "type": "osc_title"
+      },
+      "match": {
+        "regex": [
+          "(^| )[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]( |$)"
+        ]
+      },
+      "visible_working": true
+    },
+    {
+      "id": "transcript_viewer",
+      "priority": 1000,
+      "region": {
+        "type": "after_last_prompt_marker"
+      },
+      "match": {
+        "all": [
+          {
+            "contains": [
+              "↑/↓ to scroll",
+              "pgup/pgdn to",
+              "home/end to jump",
+              "q to quit"
+            ]
+          },
+          {
+            "any": [
+              {
+                "contains": [
+                  "esc to edit prev"
+                ]
+              },
+              {
+                "contains": [
+                  "esc/← to edit prev"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "skip_state_update": true
+    },
+    {
+      "id": "live_strong_blocker",
+      "priority": 900,
+      "state": "blocked",
+      "region": {
+        "type": "after_last_prompt_marker"
+      },
+      "match": {
+        "any": [
+          {
+            "contains": [
+              "press enter to confirm or esc to cancel"
+            ]
+          },
+          {
+            "contains": [
+              "enter to submit answer"
+            ]
+          },
+          {
+            "contains": [
+              "enter to submit all"
+            ]
+          },
+          {
+            "contains": [
+              "allow command?"
+            ]
+          }
+        ]
+      },
+      "visible_blocker": true
+    },
+    {
+      "id": "weak_blocker",
+      "priority": 600,
+      "state": "blocked",
+      "region": {
+        "type": "after_last_prompt_marker"
+      },
+      "match": {
+        "any": [
+          {
+            "line_regex": [
+              "(?i)\\[y/n\\]"
+            ]
+          },
+          {
+            "line_regex": [
+              "(?i)yes[[:space:]]*\\(y\\)"
+            ]
+          },
+          {
+            "all": [
+              {
+                "contains": [
+                  "do you want to"
+                ]
+              },
+              {
+                "any": [
+                  {
+                    "contains": [
+                      "yes"
+                    ]
+                  },
+                  {
+                    "contains": [
+                      "❯"
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "all": [
+              {
+                "contains": [
+                  "would you like to"
+                ]
+              },
+              {
+                "any": [
+                  {
+                    "contains": [
+                      "yes"
+                    ]
+                  },
+                  {
+                    "contains": [
+                      "❯"
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "conversation_interrupted",
+      "priority": 550,
+      "state": "idle",
+      "region": {
+        "type": "before_current_prompt_marker"
+      },
+      "match": {
+        "regex": [
+          "(?m)^[ \\t]*■ Conversation interrupted[^\\r\\n]*(\\r?\\n([ \\t]*|[ \\t]*[^[:space:]•◦›»■✗✓─][^\\r\\n]*))*[[:space:]]*\\z"
+        ]
+      },
+      "visible_idle": true
+    },
+    {
+      "id": "screen_working_fallback",
+      "priority": 500,
+      "state": "working",
+      "region": {
+        "type": "before_current_prompt_marker"
+      },
+      "match": {
+        "all": [
+          {
+            "regex": [
+              "(?m)^[ \\t]*([•◦][ \\t]+)?[^[:space:]›»•◦■✗✓─][^\\r\\n]*[[:space:]]+\\(([0-9]+[hm][[:space:]]+)*[0-9]+s([[:space:]]+([•·][[:space:]]+)?[^()\\r\\n]+[[:space:]]+to[[:space:]]+(interrupt\\)|i[a-z]*…)|\\))([ \\t]*·[^\\r\\n]*)?[ \\t]*(\\r?\\n([ \\t]*|[ \\t]*[^[:space:]•◦›»■✗✓─][^\\r\\n]*|[ \\t]*•[ \\t]+(Queued follow-up inputs|Messages to be submitted after next tool call|Messages to be submitted at end of turn)[^\\r\\n]*))*[[:space:]]*\\z"
+            ]
+          },
+          {
+            "not": [
+              {
+                "line_regex": [
+                  "^[ \\t]*([•◦][ \\t]+)?Reconnect failed — check the endpoint, then relaunch \\([0-9hms ]+\\)[ \\t]*$"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "visible_working": true
+    },
+    {
+      "id": "screen_prompt_idle",
+      "priority": 200,
+      "state": "idle",
+      "region": {
+        "type": "current_prompt_marker"
+      },
+      "match": {
+        "line_regex": [
+          "^[[:space:]]*[›»]([[:space:]\\x{2800}-\\x{28FF}]+.*)?[[:space:]]*$"
+        ]
+      },
+      "visible_idle": true
+    },
+    {
+      "id": "osc_title_idle",
+      "priority": 100,
+      "state": "idle",
+      "region": {
+        "type": "osc_title"
+      },
+      "match": {
+        "all": [
+          {
+            "regex": [
+              "\\S"
+            ]
+          },
+          {
+            "not": [
+              {
+                "regex": [
+                  "(^| )[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]( |$)"
+                ]
+              },
+              {
+                "contains": [
+                  "Action Required"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "visible_idle": true
+    }
+  ]
+}

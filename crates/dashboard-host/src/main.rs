@@ -1,14 +1,16 @@
 mod actions;
+mod collector;
 mod command;
 mod hooks;
 mod host;
 mod panes;
 mod process;
+mod screen;
 mod storage;
 mod terminal;
 mod zellij;
 
-use dashboard_core::{AgentEvent, ApplyResult, Liveness, SCHEMA_VERSION};
+use dashboard_core::{AgentEvent, ApplyResult, Liveness};
 use std::{
     env,
     io::{self, Read},
@@ -111,19 +113,7 @@ fn run(mut args: Vec<String>, deps: &host::HostDependencies) -> Result<(), Strin
             }
             hook(&dir, deps)
         }
-        "scan" => {
-            let mut locked = LockedStore::open(&dir)?;
-            let at = now_ms();
-            // All collector replicas share the same serialization and scan budget.
-            if at.saturating_sub(locked.store.last_scan_ms) >= 1800 {
-                let inventory = process::inventory(deps.runner)?;
-                locked.store.reconcile(&inventory.found, at);
-                actions::link_launches(&mut locked.store, &inventory);
-                panes::refresh_metadata(&mut locked.store, deps);
-                locked.save()?;
-            }
-            json(&locked.store.snapshot(at))
-        }
+        "scan" => json(&collector::scan(&dir, deps)?),
         "snapshot" => {
             let locked = LockedStore::open(&dir)?;
             json(&locked.store.snapshot(now_ms()))
@@ -198,9 +188,9 @@ fn hook(dir: &Path, deps: &host::HostDependencies) -> Result<(), String> {
     let observed_at = now_ms();
     let input: hooks::ClaudeHook =
         serde_json::from_str(&read_input()?).map_err(|e| format!("invalid hook JSON: {e}"))?;
-    let Some(kind) = input.kind() else {
+    if input.kind().is_none() {
         return Ok(());
-    };
+    }
     let event_id = uuid::Uuid::new_v4().to_string();
     {
         let mut locked = LockedStore::open(dir)?;
@@ -234,19 +224,10 @@ fn hook(dir: &Path, deps: &host::HostDependencies) -> Result<(), String> {
         let identity = found.identity.clone();
         locked.store.reconcile(&inventory.found, now_ms());
         let sequence = locked.store.agents[&identity.agent_id].sequence + 1;
-        let event = AgentEvent {
-            schema_version: SCHEMA_VERSION,
-            event_id: event_id.clone(),
-            identity,
-            tool: "claude".into(),
-            kind,
-            sequence,
-            observed_at_ms: observed_at,
-            cwd: input.cwd.clone(),
-            summary: hooks::limit(&input.prompt, 4096),
-            detail: input.detail(),
-        };
-        locked.store.apply(&event)?;
+        let signal = input
+            .signal(identity, sequence, observed_at, event_id.clone())
+            .unwrap();
+        locked.store.apply_signal(&signal)?;
         locked.save()?;
     }
     // Notification is an optimization. State was already committed, so pipe

@@ -1,7 +1,9 @@
+use crate::{StateSignal, StatusObservation, StatusSource};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
+pub const EVENT_SCHEMA_VERSION: u32 = 1;
 pub const STALE_AFTER_MS: u64 = 60_000;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +73,22 @@ impl Identity {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Agent {
+    #[serde(default)]
+    pub status_source: StatusSource,
+    #[serde(default)]
+    pub discovered_at_ms: u64,
+    #[serde(default)]
+    pub last_hook_report_ms: Option<u64>,
+    #[serde(default)]
+    pub last_screen_report_ms: Option<u64>,
+    #[serde(default)]
+    pub last_screen_id: String,
+    #[serde(default)]
+    pub matched_rule: String,
+    #[serde(default)]
+    pub idle_confirmations: u8,
+    #[serde(default)]
+    pub last_screen_attempt_ms: u64,
     pub identity: Identity,
     pub tool: String,
     pub cwd: String,
@@ -170,6 +188,8 @@ pub struct Activity {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Store {
+    #[serde(default)]
+    pub scan_lease: Option<ScanLease>,
     pub schema_version: u32,
     pub revision: u64,
     pub last_scan_ms: u64,
@@ -183,9 +203,16 @@ pub struct Store {
     pub recent_directories: Vec<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScanLease {
+    pub token: String,
+    pub expires_at_ms: u64,
+}
+
 impl Default for Store {
     fn default() -> Self {
         Self {
+            scan_lease: None,
             schema_version: SCHEMA_VERSION,
             revision: 0,
             last_scan_ms: 0,
@@ -222,6 +249,22 @@ pub enum ApplyResult {
 }
 
 impl Store {
+    /// v1 had only hook reports (and dashboard-generated events).
+    /// Preserve those as hook-owned rather than overwrite historical state.
+    pub fn migrate(&mut self) -> Result<(), String> {
+        if self.schema_version == 1 {
+            for agent in self.agents.values_mut() {
+                agent.discovered_at_ms = agent.status_since_ms;
+                if agent.sequence > 0 {
+                    agent.status_source = StatusSource::Hook;
+                    agent.last_hook_report_ms = agent.last_report_ms;
+                }
+            }
+            self.schema_version = SCHEMA_VERSION;
+        }
+        self.check_version()
+    }
+
     pub fn check_version(&self) -> Result<(), String> {
         if self.schema_version != SCHEMA_VERSION {
             return Err(format!("unsupported store version {}", self.schema_version));
@@ -232,7 +275,30 @@ impl Store {
     /// Hook identities must first be tied to a currently observed process.
     /// Events cannot create an arbitrary new incarnation or revive a closed one.
     pub fn apply(&mut self, event: &AgentEvent) -> Result<ApplyResult, String> {
-        if event.schema_version != SCHEMA_VERSION || event.event_id.is_empty() {
+        self.apply_signal(&StateSignal::Hook(event.clone()))
+    }
+
+    pub fn apply_signal(&mut self, signal: &StateSignal) -> Result<ApplyResult, String> {
+        match signal {
+            StateSignal::Hook(event) => self.apply_hook(event),
+            StateSignal::Screen(observation) => self.apply_screen(observation),
+            StateSignal::Instruction {
+                identity,
+                observed_at_ms,
+                text,
+            } => {
+                self.validate_target(identity)?;
+                let agent = self.agents.get_mut(&identity.agent_id).unwrap();
+                agent.summary.clone_from(text);
+                agent.last_instruction_ms = Some(*observed_at_ms);
+                self.revision += 1;
+                Ok(ApplyResult::Applied)
+            }
+        }
+    }
+
+    fn apply_hook(&mut self, event: &AgentEvent) -> Result<ApplyResult, String> {
+        if event.schema_version != EVENT_SCHEMA_VERSION || event.event_id.is_empty() {
             return Err("invalid event version or ID".into());
         }
         let Some(agent) = self.agents.get_mut(&event.identity.agent_id) else {
@@ -244,12 +310,16 @@ impl Store {
             || event.sequence <= agent.sequence
             || event.event_id == agent.last_event_id
             || agent
-                .last_report_ms
+                .last_hook_report_ms
                 .is_some_and(|at| event.observed_at_ms < at)
         {
             return Ok(ApplyResult::Ignored);
         }
         agent.sequence = event.sequence;
+        agent.status_source = StatusSource::Hook;
+        agent.last_hook_report_ms = Some(event.observed_at_ms);
+        agent.idle_confirmations = 0;
+        agent.matched_rule.clear();
         agent.last_event_id.clone_from(&event.event_id);
         agent.last_report_ms = Some(event.observed_at_ms);
         if !event.cwd.is_empty() {
@@ -299,8 +369,79 @@ impl Store {
         Ok(ApplyResult::Applied)
     }
 
+    fn apply_screen(&mut self, observation: &StatusObservation) -> Result<ApplyResult, String> {
+        if observation.observation_id.is_empty() {
+            return Err("empty observation ID".into());
+        }
+        let Some(agent) = self.agents.get_mut(&observation.identity.agent_id) else {
+            return Ok(ApplyResult::Ignored);
+        };
+        if agent.identity != observation.identity
+            || agent.tool != observation.tool
+            || agent.liveness != Liveness::Live
+            || agent.ended
+            || agent.status_source == StatusSource::Hook
+            || agent.last_screen_id == observation.observation_id
+            || agent
+                .last_screen_report_ms
+                .is_some_and(|at| observation.observed_at_ms <= at)
+            || observation
+                .observed_at_ms
+                .saturating_sub(agent.discovered_at_ms)
+                < 3000
+        {
+            return Ok(ApplyResult::Ignored);
+        }
+        // Only consecutive fresh samples count, never timer repeats of one screen.
+        if agent
+            .last_screen_report_ms
+            .is_some_and(|at| observation.observed_at_ms.saturating_sub(at) > 10_000)
+        {
+            agent.idle_confirmations = 0;
+        }
+        agent.status_source = StatusSource::Screen;
+        agent.last_screen_report_ms = Some(observation.observed_at_ms);
+        agent.last_screen_id.clone_from(&observation.observation_id);
+        if let Some(next) = observation.status {
+            agent.last_report_ms = Some(observation.observed_at_ms);
+            let confirm_idle = next == Status::Idle
+                && agent.status == Status::Working
+                && !observation.visible_idle;
+            if confirm_idle {
+                agent.idle_confirmations = agent.idle_confirmations.saturating_add(1);
+            } else {
+                agent.idle_confirmations = 0;
+            }
+            if !confirm_idle || agent.idle_confirmations >= 3 {
+                agent.matched_rule.clone_from(&observation.rule_id);
+                if next != agent.status {
+                    let previous = agent.status;
+                    agent.status = next;
+                    agent.status_since_ms = observation.observed_at_ms;
+                    self.activities.push(Activity {
+                        agent_id: agent.identity.agent_id.clone(),
+                        at_ms: observation.observed_at_ms,
+                        status: next,
+                        project: agent.project().into(),
+                        previous: Some(previous),
+                    });
+                    if self.activities.len() > 50 {
+                        self.activities.drain(..self.activities.len() - 50);
+                    }
+                }
+            }
+        } else {
+            agent.idle_confirmations = 0;
+        }
+        self.revision += 1;
+        Ok(ApplyResult::Applied)
+    }
+
     /// A successful whole process inventory is required before calling this.
     pub fn reconcile(&mut self, found: &[FoundProcess], now_ms: u64) {
+        if now_ms < self.last_scan_ms {
+            return;
+        }
         for agent in self.agents.values_mut() {
             agent.liveness = if !agent.ended && found.iter().any(|p| p.identity == agent.identity) {
                 Liveness::Live
@@ -312,6 +453,14 @@ impl Store {
             self.agents
                 .entry(process.identity.agent_id.clone())
                 .or_insert_with(|| Agent {
+                    status_source: StatusSource::Unknown,
+                    discovered_at_ms: now_ms,
+                    last_hook_report_ms: None,
+                    last_screen_report_ms: None,
+                    last_screen_id: String::new(),
+                    matched_rule: String::new(),
+                    idle_confirmations: 0,
+                    last_screen_attempt_ms: 0,
                     identity: process.identity.clone(),
                     tool: process.tool.clone(),
                     cwd: process.cwd.clone(),
@@ -517,5 +666,181 @@ mod tests {
             store.apply(&event("run", 2, EventKind::ToolStarted)),
             Ok(ApplyResult::Ignored)
         );
+    }
+    fn screen(run: &str, at: u64, status: Option<Status>, visible_idle: bool) -> StateSignal {
+        StateSignal::Screen(StatusObservation {
+            identity: found(run).identity,
+            tool: "claude".into(),
+            observation_id: format!("screen-{run}-{at}"),
+            observed_at_ms: at,
+            status,
+            visible_idle,
+            rule_id: "test-rule".into(),
+        })
+    }
+
+    #[test]
+    fn hook_takes_over_screen_and_persists_without_timeout_fallback() {
+        let mut store = Store::default();
+        store.reconcile(&[found("run")], 1000);
+        assert_eq!(
+            store
+                .apply_signal(&screen("run", 2000, Some(Status::Working), false))
+                .unwrap(),
+            ApplyResult::Ignored
+        );
+        store
+            .apply_signal(&screen("run", 5000, Some(Status::Working), false))
+            .unwrap();
+        // Source timestamps are independent: a first hook captured before the
+        // screen sample still establishes the authoritative hook connection.
+        store
+            .apply(&event("run", 1, EventKind::TurnFinished))
+            .unwrap();
+        assert_eq!(store.agents["run"].status_source, StatusSource::Hook);
+        let mut recovered: Store =
+            serde_json::from_str(&serde_json::to_string(&store).unwrap()).unwrap();
+        recovered.reconcile(&[found("run")], 100_000);
+        assert_eq!(
+            recovered
+                .apply_signal(&screen("run", 100_000, Some(Status::Working), false))
+                .unwrap(),
+            ApplyResult::Ignored
+        );
+        assert_eq!(recovered.agents["run"].status, Status::Done);
+        assert!(recovered.agents["run"].stale(100_000));
+        recovered.reconcile(&[found("replacement")], 101_000);
+        assert_eq!(
+            recovered.agents["replacement"].status_source,
+            StatusSource::Unknown
+        );
+    }
+
+    #[test]
+    fn screen_rejects_duplicates_reverse_order_and_reused_panes() {
+        let mut store = Store::default();
+        store.reconcile(&[found("run")], 1000);
+        let working = screen("run", 5000, Some(Status::Working), false);
+        store.apply_signal(&working).unwrap();
+        assert_eq!(store.apply_signal(&working).unwrap(), ApplyResult::Ignored);
+        assert_eq!(
+            store
+                .apply_signal(&screen("run", 4000, Some(Status::Idle), true))
+                .unwrap(),
+            ApplyResult::Ignored
+        );
+        store.reconcile(&[found("replacement")], 6000);
+        assert_eq!(
+            store
+                .apply_signal(&screen("run", 7000, Some(Status::Idle), true))
+                .unwrap(),
+            ApplyResult::Ignored
+        );
+        assert_eq!(store.agents["replacement"].status, Status::Found);
+    }
+
+    #[test]
+    fn fallback_idle_requires_fresh_consecutive_samples_and_overlay_resets_it() {
+        let mut store = Store::default();
+        store.reconcile(&[found("run")], 1000);
+        store
+            .apply_signal(&screen("run", 5000, Some(Status::Working), false))
+            .unwrap();
+        let idle = screen("run", 7000, Some(Status::Idle), false);
+        store.apply_signal(&idle).unwrap();
+        store.apply_signal(&idle).unwrap();
+        assert_eq!(store.agents["run"].idle_confirmations, 1);
+        store
+            .apply_signal(&screen("run", 9000, None, false))
+            .unwrap();
+        assert_eq!(store.agents["run"].idle_confirmations, 0);
+        for at in [11_000, 13_000] {
+            store
+                .apply_signal(&screen("run", at, Some(Status::Idle), false))
+                .unwrap();
+            assert_eq!(store.agents["run"].status, Status::Working);
+        }
+        store
+            .apply_signal(&screen("run", 15_000, Some(Status::Idle), false))
+            .unwrap();
+        assert_eq!(store.agents["run"].status, Status::Idle);
+        store
+            .apply_signal(&screen("run", 17_000, Some(Status::Working), false))
+            .unwrap();
+        store
+            .apply_signal(&screen("run", 19_000, Some(Status::Idle), true))
+            .unwrap();
+        assert_eq!(store.agents["run"].status, Status::Idle);
+    }
+
+    #[test]
+    fn local_instruction_does_not_claim_hook_or_invent_turn_completion() {
+        let mut store = Store::default();
+        store.reconcile(&[found("run")], 1000);
+        store
+            .apply_signal(&screen("run", 5000, Some(Status::Idle), true))
+            .unwrap();
+        store
+            .apply_signal(&StateSignal::Instruction {
+                identity: found("run").identity,
+                observed_at_ms: 6000,
+                text: "새 지시".into(),
+            })
+            .unwrap();
+        let agent = &store.agents["run"];
+        assert_eq!(agent.status_source, StatusSource::Screen);
+        assert_eq!(agent.status, Status::Idle);
+        assert_eq!(agent.summary, "새 지시");
+        assert_eq!(agent.sequence, 0);
+    }
+
+    #[test]
+    fn older_process_inventory_cannot_revive_a_replaced_execution() {
+        let mut store = Store::default();
+        store.reconcile(&[found("old")], 1000);
+        store.reconcile(&[found("new")], 2000);
+        let revision = store.revision;
+        store.reconcile(&[found("old")], 1500);
+        assert_eq!(store.agents["old"].liveness, Liveness::Gone);
+        assert_eq!(store.agents["new"].liveness, Liveness::Live);
+        assert_eq!(store.revision, revision);
+    }
+
+    #[test]
+    fn version_one_migration_preserves_reported_state_and_unknown_discovery() {
+        let mut store = Store::default();
+        store.reconcile(&[found("run"), found("manual")], 1000);
+        store
+            .apply(&event("run", 1, EventKind::TurnFinished))
+            .unwrap();
+        let mut value = serde_json::to_value(&store).unwrap();
+        value["schema_version"] = 1.into();
+        value.as_object_mut().unwrap().remove("scan_lease");
+        for agent in value["agents"].as_object_mut().unwrap().values_mut() {
+            for key in [
+                "status_source",
+                "discovered_at_ms",
+                "last_hook_report_ms",
+                "last_screen_report_ms",
+                "last_screen_id",
+                "matched_rule",
+                "idle_confirmations",
+                "last_screen_attempt_ms",
+            ] {
+                agent.as_object_mut().unwrap().remove(key);
+            }
+        }
+        let mut migrated: Store = serde_json::from_value(value).unwrap();
+        migrated.migrate().unwrap();
+        assert_eq!(migrated.schema_version, 2);
+        assert_eq!(migrated.agents["run"].status_source, StatusSource::Hook);
+        assert_eq!(migrated.agents["run"].status, Status::Done);
+        assert_eq!(
+            migrated.agents["manual"].status_source,
+            StatusSource::Unknown
+        );
+        let before = serde_json::to_string(&migrated).unwrap();
+        migrated.migrate().unwrap();
+        assert_eq!(serde_json::to_string(&migrated).unwrap(), before);
     }
 }

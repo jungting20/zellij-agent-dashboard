@@ -6,7 +6,7 @@ Zellij를 실행 기반으로 사용해 기존 agent-dashboard의 조회와 조�
 
 ## 기준과 목표
 
-기능 기준은 `zellij-with-codeagent`의 `internal/agentdashboard`다. 해당 대시보드는 데몬에서 목록과 이벤트를 받고, 데몬의 Monitor는 화면 내용과 pane 제목을 YAML 규칙으로 판별한다. 새 프로젝트는 훅 이벤트를 우선 사용하고 기존 화면 탐지는 필요할 때 도구별 보완 수단으로 이관한다.
+기능 기준은 `zellij-with-codeagent`의 `internal/agentdashboard`다. 해당 대시보드는 데몬에서 목록과 이벤트를 받고, 데몬의 Monitor는 화면 내용과 pane 제목을 YAML 규칙으로 판별한다. 새 프로젝트는 공통 상태 신호를 사용한다. 유효한 훅을 받은 실행은 훅을 사용하고, 훅 미연결 실행은 이관한 도구별 화면 규칙을 사용한다. 2026년 10월 8일 화면 어댑터를 추가했다.
 
 백그라운드 수집기는 화면 pane과 독립적으로 실행한다. 같은 세션에 여러 클라이언트가 연결되거나 대시보드를 여러 번 열어도 상태 갱신과 외부 조작을 중복 수행하지 않아야 한다. Zellij pipe는 대상 플러그인의 여러 인스턴스에 전달될 수 있으므로 이 조건을 먼저 검증한다. [Zellij pipe 문서](https://zellij.dev/documentation/plugin-pipes)
 

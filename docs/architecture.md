@@ -10,13 +10,15 @@ Claude 훅 ── dashboard-host hook ── 공유 JSON 저장소
                  └── pipe 변경 통지      │ 파일 잠금 + 원자적 교체
                                        │
 Zellij collector ── 2초 타이머 ── dashboard-host scan
+                                       ├── 프로세스 생존 확인
+                                       └── 훅 미연결 실행의 화면 판별
                                        │
 Zellij dashboard ─────────────── dashboard-host snapshot
        │
        └── Enter ── dashboard-host resolve ── 실행 세대 확인 ── pane 이동
 ```
 
-`dashboard-core`는 이벤트·상태 전이와 화면 모델을 담당한다. `dashboard-host`는 프로세스 탐지, 저장소, Claude 훅을 담당한다. `dashboard-plugin`은 같은 WASI 실행 파일을 `mode=collector`와 `mode=dashboard` 설정으로 사용한다. 파일 경로는 WASI 마운트 경로로 변환하지 않고 네이티브 보조 명령에 절대 경로로 전달한다.
+`dashboard-core`는 공통 `StateSignal`, 상태 전이와 화면 모델을 담당한다. `dashboard-host`의 도구별 어댑터는 Claude 훅 JSON과 pane 화면을 공통 신호로 정규화한다. 외부 수집과 저장은 host에 남는다. `dashboard-plugin`은 같은 WASI 실행 파일을 `mode=collector`와 `mode=dashboard` 설정으로 사용한다. 파일 경로는 WASI 마운트 경로로 변환하지 않고 네이티브 보조 명령에 절대 경로로 전달한다.
 
 collector는 시작 권한을 받은 뒤 화면에서 숨겨진다. 대시보드 화면을 닫거나 클라이언트가 detach해도 타이머 수집이 남는다. 모든 수집기 세션을 종료하면 주기적 탐지도 멈춘다. 연결된 Claude 훅 자체는 저장소를 직접 갱신할 수 있다.
 
@@ -36,9 +38,9 @@ collector는 시작 권한을 받은 뒤 화면에서 숨겨진다. 대시보드
 
 기본 저장 위치는 `${XDG_STATE_HOME:-$HOME/.local/state}/zellij-agent-dashboard`다. `store.json`은 schema version, revision, 마지막 스캔 시점, 에이전트와 활동 기록을 포함한다. 별도 `store.lock` 파일의 OS 잠금을 잡은 명령만 파일을 읽거나 갱신한다. 잠금 대기는 최대 2초다.
 
-여러 세션·클라이언트의 collector가 같은 저장소를 사용한다. 별도의 작성자 선출이나 상주 조정 프로세스를 두지 않는다. 공유 마지막 스캔 시점으로 프로세스 탐지를 1.8초 이상 간격으로 제한한다. 훅은 같은 잠금 아래 현재 실행 ID를 확인하고 순서 번호를 부여해 반영한다.
+여러 세션·클라이언트의 collector가 같은 저장소를 사용한다. 별도의 작성자 선출이나 상주 조정 프로세스를 두지 않는다. 공유 마지막 스캔 시점으로 프로세스 탐지를 1.8초 이상 간격으로 제한한다. `scan_lease`의 토큰과 10초 만료 시각으로 중복 collector의 동시 수집을 제한한다. 실패 시 자신의 예약을 해제하고, helper 중단 시 만료 후 다음 collector가 이어받는다. 메타데이터·화면·프로세스 읽기는 저장소 잠금 밖에서 수행하고, 화면 조회 후 프로세스 전체 목록을 다시 확인한다. 만료되거나 교체된 예약의 결과는 저장하지 않는다. 훅은 같은 잠금 아래 현재 실행 ID를 확인하고 순서 번호를 부여해 반영한다.
 
-저장소 디렉터리는 700, 상태와 잠금 파일은 600 권한이다. 임시 파일에 직렬화하고 fsync 후 원자적으로 교체한다. 손상되거나 더 새로운 스키마의 파일은 덮어쓰지 않고 오류를 반환한다. 복구하려면 모든 관련 수집기를 중단하고 기존 상태 파일을 백업·이동한 뒤 다시 시작한다. 현재 스키마는 1이며 기존 SQLite 데이터는 읽지 않는다.
+저장소 디렉터리는 700, 상태와 잠금 파일은 600 권한이다. 임시 파일에 직렬화하고 fsync 후 원자적으로 교체한다. 손상되거나 더 새로운 스키마의 파일은 덮어쓰지 않고 오류를 반환한다. 복구하려면 모든 관련 수집기를 중단하고 기존 상태 파일을 백업·이동한 뒤 다시 시작한다. 현재 저장소와 스냅샷 스키마는 2다. 이벤트 JSON은 `EVENT_SCHEMA_VERSION=1`을 유지한다. 스키마 1은 읽을 때 자동 이관하고 다음 저장에서 2로 기록한다. 기존 이벤트 순서가 있는 실행은 상태와 보고 시각을 보존하며 훅 경로로 이관한다. 기존 v1의 대시보드 생성 이벤트와 실제 훅은 구분할 수 없으므로 둘 모두 훅으로 보존한다. 순서가 없는 발견 실행은 `unknown`에서 화면 감지를 시작한다. 새 출처별 시각·관측 ID·규칙·연속 idle 확인 횟수·수집 시도 시각은 기본값으로 초기화하고, 발견 시각은 기존 상태 시작 시각으로 복원한다. 수집 예약의 기본값은 없음이다. 기존 SQLite 데이터는 읽지 않는다. 이전 바이너리는 스키마 2를 거부하므로 롤백 시에는 업그레이드 전 백업을 사용한다.
 
 ## 실행 식별과 상태
 
@@ -56,7 +58,21 @@ Claude 훅은 현재 pane의 실제 Claude 프로세스가 자신의 조상인�
 
 설정 생성기는 별도 JSON을 출력한다. 사용자 전역 훅을 자동 등록하지 않는다. 제공하는 이벤트는 SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest, Notification, Stop, PreCompact, SessionEnd다. Notification은 permission_prompt와 idle_prompt만 받는다. PostToolUseFailure는 도구 결과로 처리하며 전체 턴 실패로 간주하지 않는다. StopFailure와 PostCompact는 파서에만 있고 설치 설정에는 아직 포함하지 않는다.
 
-실제 Claude 검증은 SessionStart만 수행했다. 나머지 이벤트 매핑의 전체 실동작 검증, Codex 및 다른 도구의 훅 어댑터, 화면 내용 보완 탐지는 후속 작업이다.
+실제 Claude 검증은 SessionStart만 수행했다. 나머지 이벤트 매핑의 전체 실동작 검증, Codex 및 다른 도구의 훅 어댑터, 화면 내용 탐지는 아래 어댑터가 담당한다.
+
+## 공통 상태 신호와 감지 경로
+
+`StateSignal::Hook(AgentEvent)`와 `StateSignal::Screen(StatusObservation)`은 같은 `Store::apply_signal()` 경계를 사용한다. 사건과 현재 상태 관측의 의미는 유지한다. `Instruction`은 대시보드가 실제 전송한 지시만 저장하며 훅 연결이나 턴 시작으로 간주하지 않는다. 기존 `Store::apply()`와 ingest JSON은 호환 진입점으로 남는다.
+
+에이전트 실행마다 `status_source=unknown|screen|hook`을 저장한다. 발견 후 3초 동안 화면 판별을 유예한다. 유효한 훅을 아직 받지 않은 실행은 화면을 사용하고, 첫 유효한 훅이 도착하면 해당 실행 세대 동안 훅만 사용한다. 훅의 무응답 시간으로 화면에 복귀하지 않는다. 출처 선택은 reload 후에도 유지하고 새로운 프로세스 세대에서는 초기화한다. 훅 지원 도구라는 사실만으로 설치 여부를 확정할 수 없으므로 실제 이벤트 수신을 연결 근거로 삼는다. 연결 해제나 수동 출처 선택 설정은 이번 구현에 포함하지 않는다.
+
+화면 규칙은 참고 저장소의 Claude, Codex, Gemini, Cursor 프로필을 JSON으로 내장한다. 우선순위와 같은 우선순위의 선언 순서, contains/regex/line_regex/all/any/not, 프롬프트·수평 구분선·하단 영역, transcript 등의 상태 보존 규칙을 유지한다. 원본 `blocked`는 `waiting`, `idle`은 `idle`로 변환하며 화면만으로 `done`을 만들지 않는다. Hermes는 규칙이 없으므로 훅이 없으면 `found`를 유지한다. 출처와 라이선스 확인은 [화면 어댑터 출처](screen-adapter-provenance.md)에 기록한다.
+
+일반 pane 제목은 idle 근거로 쓰지 않고 명시적인 working/waiting 제목 규칙만 허용한다. 이번 스캔에서 조회하지 못한 제목은 상태 판별에 쓰지 않는다. Zellij dump-screen/list-panes는 OSC progress를 제공하지 않아 해당 규칙은 활성화되지 않는다.
+
+규칙에 일치하지 않으면 원본과 같이 idle 후보로 처리한다. working에서 명시적인 idle 표시 없이 idle로 바뀌려면 서로 다른 새 관측 3개가 연속으로 필요하다. 원본의 100ms 타이머/700ms 마감은 이관하지 않고 collector 주기를 사용한다. 10초 이상 관측 공백, 보존 overlay, 빈 화면 또는 화면 조회 실패는 후보를 취소한다. 빈 화면·조회 실패는 작업 상태와 마지막 유효 보고 시각을 유지한다. 명시적인 프롬프트 idle은 즉시 반영한다.
+
+화면 조회에는 라운드당 1.2초 예산을 두고 가장 오래 조회하지 않은 실행부터 처리한다. 개별 CLI 조회는 기존 500ms 제한을 사용하므로 마지막 조회는 예산을 최대 500ms 초과할 수 있다. 많은 에이전트는 여러 collector 주기에 나눠 조회한다. 관측 직후 실행 세대를 재검증하고, 코어에서도 전체 identity·생존·출처·관측 ID·시각을 확인한다. 훅과 화면의 순서/시각은 별도로 검증하므로 화면 뒤에 처음 받은 훅이 다른 출처의 순서 때문에 거부되지 않는다. 훅 전환 뒤 늦게 끝난 화면 결과는 무시한다.
 
 ## 화면과 권한
 

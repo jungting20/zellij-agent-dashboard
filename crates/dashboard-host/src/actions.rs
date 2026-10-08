@@ -6,8 +6,8 @@ use crate::{
     terminal::{NewPane, SessionId},
 };
 use dashboard_core::{
-    Action, ActionRequest, ActionResult, Agent, AgentEvent, Catalog, EventKind, Identity,
-    LaunchInfo, Liveness, RequestState, Status, SCHEMA_VERSION,
+    Action, ActionRequest, ActionResult, Agent, Catalog, Identity, LaunchInfo, Liveness,
+    RequestState, StateSignal, Status,
 };
 use std::{
     env, fs,
@@ -246,20 +246,11 @@ fn send(dir: &Path, target: &Identity, text: &str, deps: &HostDependencies) -> R
     let mut locked = LockedStore::open(dir)?;
     let at = now_ms();
     locked.store.validate_target(target)?;
-    let agent = &locked.store.agents[&target.agent_id];
-    let event = AgentEvent {
-        schema_version: SCHEMA_VERSION,
-        event_id: uuid::Uuid::new_v4().to_string(),
+    locked.store.apply_signal(&StateSignal::Instruction {
         identity: target.clone(),
-        tool: agent.tool.clone(),
-        kind: EventKind::TurnStarted,
-        sequence: agent.sequence + 1,
         observed_at_ms: at,
-        cwd: String::new(),
-        summary: text.into(),
-        detail: "dashboard input".into(),
-    };
-    locked.store.apply(&event)?;
+        text: text.into(),
+    })?;
     locked.save()
 }
 

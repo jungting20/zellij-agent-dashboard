@@ -118,7 +118,10 @@ load_plugins {{
     def call(session, *command, timeout=8):
         for client in clients:
             client.pump()
-        result = subprocess.run([zellij, "--session", session, *command], stdin=subprocess.DEVNULL,
+        environment = os.environ.copy()
+        for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
+            environment.pop(key, None)
+        result = subprocess.run([zellij, "--session", session, *command], env=environment, stdin=subprocess.DEVNULL,
                                 capture_output=True, text=True, timeout=timeout)
         if result.returncode:
             raise RuntimeError(f"Zellij {command[0]} failed: {result.stderr.strip()}")
@@ -148,6 +151,12 @@ load_plugins {{
                 last_error = str(error)
             time.sleep(0.1)
         (directory / "terminal.log").write_text("\n".join(c.capture for c in clients))
+        if description.startswith("Enter focuses"):
+            diagnostics = {}
+            for session in sessions:
+                diagnostics[session] = {"clients": call(session, "action", "list-clients"),
+                                        "dashboard": ping(session, "dashboard") if session == sessions[0] else []}
+            (directory / "focus-debug.json").write_text(json.dumps(diagnostics, indent=2))
         raise AssertionError(f"{description}: {last_error}; artifacts: {directory}")
 
     try:
@@ -168,22 +177,55 @@ load_plugins {{
         source = directory / "codex.rs"
         source.write_text(r'''use std::io::{BufRead, Write};
 fn main() {
-    println!("fixture ready");
+    println!("fixture ready\n› ");
     let mut log = std::fs::OpenOptions::new().create(true).append(true).open("input.log").unwrap();
     for line in std::io::stdin().lock().lines() {
         let line = line.unwrap();
         writeln!(log, "{line}").unwrap();
         log.flush().unwrap();
+        let screen = match line.trim() {
+            ":working" => Some("• Thinking (3s • esc to interrupt)\n› "),
+            ":waiting" => Some("› task\nAllow command?"),
+            ":idle" => Some("› "),
+            ":overlay" => Some("› \n↑/↓ to scroll · PgUp/PgDn to scroll · Home/End to jump · q to quit · esc to edit prev"),
+            ":unknown" => Some("ordinary output"),
+            _ => None,
+        };
+        if let Some(screen) = screen {
+            print!("\x1b[2J\x1b[H{screen}\n");
+            std::io::stdout().flush().unwrap();
+        }
     }
 }
 ''')
         rustup = os.environ.get("ZAD_RUSTUP", str(Path.home() / ".cargo/bin/rustup"))
         subprocess.run([rustup, "run", "1.88.0", "rustc", str(source), "-o", str(fake)], check=True)
         for session in sessions:
-            call(session, "action", "new-pane", "--name", "discovery-test", "--", str(fake), "300")
+            call(session, "action", "new-pane", "--name", "discovery-test", "--cwd", str(directory), "--", str(fake), "300")
         def discovered():
             return [a for a in host_call("snapshot")["agents"] if a["identity"]["session_name"] in sessions and a["tool"] == "codex"]
         rows = wait_for("discovery across two sessions including spaces", lambda: discovered() if len(discovered()) == 2 else None)
+        screen_row = next(a for a in rows if a["identity"]["session_name"] == first)
+        def current_screen_row():
+            return next(a for a in discovered() if a["identity"] == screen_row["identity"])
+        def show_fixture(command):
+            pane_id = f'terminal_{screen_row["identity"]["pane_id"]}'
+            # Clear any buffered keys from permission-dialog automation.
+            call(first, "action", "write", "--pane-id", pane_id, "21")
+            call(first, "action", "write-chars", "--pane-id", pane_id, command)
+            call(first, "action", "write", "--pane-id", pane_id, "13")
+        wait_for("hook-free fixture selects screen adapter", lambda: current_screen_row()["status_source"] == "screen")
+        for command, status in [(":working", "working"), (":waiting", "waiting"), (":idle", "idle")]:
+            show_fixture(command)
+            wait_for(f"screen adapter detects {status}", lambda: current_screen_row()["status"] == status)
+        show_fixture(":working")
+        wait_for("screen working before overlay", lambda: current_screen_row()["status"] == "working")
+        show_fixture(":overlay")
+        before_screen = current_screen_row()["last_screen_report_ms"]
+        wait_for("transcript overlay preserves working", lambda: current_screen_row()["last_screen_report_ms"] > before_screen
+                 and current_screen_row()["status"] == "working")
+        show_fixture(":unknown")
+        wait_for("unmatched idle requires fresh confirmations", lambda: current_screen_row()["status"] == "idle")
         # Drive host adapters with a local fixture, never a model request.
         action_environment = os.environ.copy()
         # A caller's pane ID belongs to its own session, not this test session.
@@ -226,16 +268,15 @@ fn main() {
         def attached(session):
             return [line.split() for line in call(session, "action", "list-clients").splitlines()
                     if re.match(r"^\d+\s+", line)]
-        target_clients = len(attached(sessions[1]))
+        source_clients = len(attached(first))
         focus_ui = call(first, "plugin", "--configuration", f"mode=dashboard,{base_config}", "--", f"file:{wasm}").strip()
         wait_for("focus dashboard loaded", lambda: any(p["revision"] is not None for p in ping(first, "dashboard")))
-        for client in (clients[0], clients[2]):
-            os.write(client.fd, f"/{sessions[1]}\r".encode())
+        # Drive one attached client; each client has its own dashboard view.
+        os.write(clients[0].fd, f"/{sessions[1]}\r".encode())
         wait_for("keyboard search selects requested agent", lambda: any(p["selected_id"] == target["identity"]["agent_id"]
                  and p["query"] == sessions[1] for p in ping(first, "dashboard")))
-        for client in (clients[0], clients[2]):
-            os.write(client.fd, b"\r")
-        wait_for("Enter focuses agent in other session", lambda: len(attached(sessions[1])) > target_clients
+        os.write(clients[0].fd, b"\r")
+        wait_for("Enter focuses agent in other session", lambda: len(attached(first)) < source_clients
                  and any(row[1] == f'terminal_{target["identity"]["pane_id"]}' for row in attached(sessions[1])))
         clients.append(Client([zellij, "attach", first], directory))
         wait_for("collector available after focus", lambda: any(p["permissions"] for p in ping(first)))
@@ -248,33 +289,17 @@ fn main() {
         second_result = host_call("ingest", input=json.dumps(event))
         assert first_result["applied"] and not second_result["applied"]
         print("PASS duplicate event persisted once", flush=True)
+        assert current_screen_row()["status_source"] == "hook"
+        show_fixture(":idle")
+        before_scan = host_call("snapshot")["last_scan_ms"]
+        wait_for("hook ownership rejects later idle screen", lambda: host_call("snapshot")["last_scan_ms"] > before_scan
+                 and current_screen_row()["status_source"] == "hook" and current_screen_row()["status"] == "working")
         resolved = host_call("resolve", row["identity"]["agent_id"])
         assert resolved["identity"] == row["identity"]
         call(resolved["identity"]["session_name"], "action", "close-pane", "--pane-id", f'terminal_{resolved["identity"]["pane_id"]}')
         result = subprocess.run([str(host), "--state-dir", str(state), "resolve", row["identity"]["agent_id"]], capture_output=True)
         assert result.returncode == 1
         print("PASS stale pane identity rejected", flush=True)
-
-        if args.real_claude:
-            claude = shutil.which("claude")
-            assert claude, "claude is required for --real-claude"
-            settings = directory / "claude-settings.json"
-            settings.write_text(json.dumps(host_call("hook-config")))
-            # Keep onboarding/trust records inside this test, outside user settings.
-            claude_config = directory / "claude-config"
-            claude_config.mkdir(mode=0o700)
-            (claude_config / ".claude.json").write_text(json.dumps({"hasCompletedOnboarding": True}))
-            claude_pane = call(first, "action", "new-pane", "--name", "real-claude-hook", "--cwd", str(ROOT), "--",
-                 "/usr/bin/env", f"CLAUDE_CONFIG_DIR={claude_config}", claude,
-                 "--setting-sources", "", "--settings", str(settings)).strip()
-            def reported():
-                screen = call(first, "action", "dump-screen", "--pane-id", claude_pane)
-                if "Yes, I trust this folder" in screen:
-                    keys = ["27", "91", "66", "13"] if re.search(r"❯\s*(?:\d\.\s*)?No", screen) else ["13"]
-                    call(first, "action", "write", "--pane-id", claude_pane, *keys)
-                return any(a["tool"] == "claude" and a["last_report_ms"] is not None
-                           for a in host_call("snapshot")["agents"] if a["identity"]["session_name"] == first)
-            wait_for("real Claude SessionStart hook", reported, seconds=40)
 
         for client in clients:
             client.stop()
@@ -292,7 +317,29 @@ fn main() {
                        stdin=subprocess.DEVNULL, capture_output=True, text=True, check=True, timeout=8)
         wait_for("launcher opens floating dashboard", lambda: any(p["revision"] is not None
                  for p in ping(first, "dashboard", ROOT / "dist/agent-dashboard.wasm")))
-        (directory / "result.json").write_text(json.dumps({"passed":True, "sessions":sessions, "real_claude":args.real_claude}, indent=2))
+        # Keep optional tool onboarding after the collector lifecycle checks.
+        if args.real_claude:
+            claude = shutil.which("claude")
+            assert claude, "claude is required for --real-claude"
+            settings = directory / "claude-settings.json"
+            settings.write_text(json.dumps(host_call("hook-config")))
+            # Keep onboarding/trust records inside this test, outside user settings.
+            claude_config = directory / "claude-config"
+            claude_config.mkdir(mode=0o700)
+            (claude_config / ".claude.json").write_text(json.dumps({"hasCompletedOnboarding": True}))
+            claude_pane = call(first, "action", "new-pane", "--name", "real-claude-hook", "--cwd", str(ROOT), "--",
+                 "/usr/bin/env", f"CLAUDE_CONFIG_DIR={claude_config}", claude,
+                 "--setting-sources", "", "--settings", str(settings)).strip()
+            def reported():
+                screen = call(first, "action", "dump-screen", "--pane-id", claude_pane)
+                if "Yes, I trust this folder" in screen:
+                    keys = ["27", "91", "66", "13"] if re.search(r"❯\s*(?:\d\.\s*)?No", screen) else ["13"]
+                    call(first, "action", "write", "--pane-id", claude_pane, *keys)
+                return any(a["tool"] == "claude" and a["status_source"] == "hook"
+                           for a in host_call("snapshot")["agents"] if a["identity"]["session_name"] == first)
+            wait_for("real Claude SessionStart hook", reported, seconds=40)
+
+        (directory / "result.json").write_text(json.dumps({"passed":True, "sessions":sessions, "real_claude":args.real_claude, "screen_adapter":True}, indent=2))
         print(f"Artifacts: {directory}", flush=True)
     finally:
         for session in sessions:

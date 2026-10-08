@@ -1,4 +1,4 @@
-use dashboard_core::EventKind;
+use dashboard_core::{AgentEvent, EventKind, Identity, StateSignal, EVENT_SCHEMA_VERSION};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -21,6 +21,30 @@ pub struct ClaudeHook {
 }
 
 impl ClaudeHook {
+    pub fn signal(
+        &self,
+        identity: Identity,
+        sequence: u64,
+        at: u64,
+        event_id: String,
+    ) -> Option<StateSignal> {
+        Some(
+            AgentEvent {
+                schema_version: EVENT_SCHEMA_VERSION,
+                event_id,
+                identity,
+                tool: "claude".into(),
+                kind: self.kind()?,
+                sequence,
+                observed_at_ms: at,
+                cwd: self.cwd.clone(),
+                summary: limit(&self.prompt, 4096),
+                detail: self.detail(),
+            }
+            .into(),
+        )
+    }
+
     pub fn kind(&self) -> Option<EventKind> {
         Some(match self.hook_event_name.as_str() {
             "SessionStart" => EventKind::SessionStarted,

@@ -50,3 +50,26 @@ Claude의 실제 이벤트 검증 범위는 SessionStart다. 작업·도구·승
 검증 결과는 `.local/smoke-0c888d8498/result.json`에 남겼으며 검사 종료 후 임시 세션을 종료했다. 상태 스키마는 기존 1을 유지했다. 현재 운영 세션에 설치나 reload를 적용하지 않았다.
 
 첫 추가 검증에서는 테스트 호출자가 상속한 `ZELLIJ_PANE_ID`가 다른 세션의 pane을 가리켜 `--no-focus`로 생성한 pane의 화면이 비었다. Zellij CLI 직접 호출에서도 재현했고, 테스트 action 실행 환경에서 `ZELLIJ`, `ZELLIJ_SESSION_NAME`, `ZELLIJ_PANE_ID`를 제거한 뒤 통과했다. 이 리팩토링은 CLI의 원래 환경 상속 동작을 변경하지 않는다. 다른 세션으로 no-focus 실행할 때 호출 pane 문맥을 어떻게 전달할지는 별도의 호스트 동작 개선 대상이다.
+
+
+## 2026년 10월 8일 공통 상태 신호와 화면 어댑터
+
+`StateSignal`을 통한 코어 입력으로 리팩토링하고, 참고 저장소의 Claude/Codex/Gemini/Cursor 화면 규칙·매처·화면 영역을 이관했다. 원본 YAML과 내장 JSON의 내용이 같은 것을 확인했다. 저장소와 스냅샷은 스키마 2이며, 기존 이벤트 JSON은 버전 1을 유지한다. 출처 및 라이선스 확인은 [화면 어댑터 출처](screen-adapter-provenance.md)에 기록했다.
+
+`./scripts/check.sh`에서 코어 21개와 호스트 28개, 총 49개 테스트, Rust 포맷, 네이티브/WASI Clippy와 셸/Python 구문 검사를 통과했다. `./scripts/build.sh`로 네이티브 host와 wasm32-wasip1 release 플러그인을 빌드했다. 테스트는 출처별 순서와 중복, 훅 전환 후 늦은 화면 결과, 시작 유예, 연속 idle 확인과 overlay/실패 시 취소, 실행 세대 교체, 오래된 프로세스 목록 무시, 스키마 1 이관, 저장 후 출처 복원, 입력을 훅 연결로 취급하지 않는 동작을 포함한다. host 대역으로 저장소 잠금 밖의 화면 조회, 조회 도중 훅 도착·프로세스 교체, 중복 collector의 읽기 억제, 수집 예약 만료 후 복구도 확인했다.
+
+Zellij 0.45.0의 소유한 임시 세션 두 개에서 `python3 scripts/smoke.py`와 `python3 scripts/smoke.py --real-claude`를 통과했다. 결과는 각각 `.local/smoke-b912f2731b/result.json`과 `.local/smoke-5d10a182a5/result.json`에 남겼다. 확인 범위는 다음과 같다.
+
+| 항목 | 확인한 동작 |
+|---|---|
+| 화면 경로 | 훅 없는 Codex fixture가 화면 경로를 선택하고 working/waiting/idle로 전환 |
+| 화면 보존 | transcript overlay에서 working 유지, 미일치 화면은 서로 다른 관측으로 idle 확인 |
+| 훅 경로 전환 | 공통 이벤트 ingest 후 hook으로 전환하고 이후 idle 화면이 working을 덮어쓰지 않음 |
+| 실제 도구 훅 | 격리 설정의 실제 Claude SessionStart로 hook 출처 확인, 모델 요청 없음 |
+| 생존·세대 | CLI로 종료한 pane의 오래된 identity를 resolve에서 거부 |
+| 화면·collector 수명 | 대시보드 종료, 두 클라이언트, 모든 클라이언트 detach, 재연결과 reload 후 수집·저장 상태 복원 |
+| 기존 조작 | pane 생성, preview, 한국어 여러 줄 입력, 요청 중복 억제, 종료와 세션 간 이동 |
+
+reload 뒤 상태 파일에 hook과 screen 출처가 모두 보존되고 수집 예약이 해제된 것도 확인했다. 실제 Gemini/Cursor 및 Claude 전체 대화 흐름의 화면 감지를 확인한 것은 아니다. 이 프로필들은 내장 규칙의 정규식 컴파일과 대표 화면 단위 테스트로 검증했다. OSC progress는 Zellij 조회 계약이 제공하지 않아 사용하지 않는다. 이번 실제 Claude 화면은 2.1.292였으며 이후 로컬 `claude --version`은 2.1.293을 보고했다. 전체 훅 이벤트 지원 범위를 이 검증만으로 확장하지 않는다.
+
+smoke는 명시적 세션 CLI 호출에서 호출자의 Zellij 환경 변수를 제거하고 fixture cwd도 임시 디렉터리로 지정한다. 초기 permission 자동 입력의 잔여 문자는 fixture 명령 전에 지운다. 세션 이동은 한 클라이언트에서 지시하고, 출발 세션의 클라이언트 감소와 대상 pane 초점을 확인한다. 서로 다른 세션에 같은 클라이언트 ID가 있으면 이동 뒤 대상 클라이언트 수가 늘지 않을 수 있다. 선택적 Claude 검사는 collector 수명 검증 뒤에 실행하여 도구 onboarding 화면이 lifecycle 자동화에 개입하지 않도록 했다.

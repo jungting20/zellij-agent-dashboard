@@ -36,10 +36,10 @@
 
 | 도구 | 기존 실행 파일 | 현재 기준과 새 연결 방향 |
 |---|---|---|
-| Claude | `claude` | 프로세스 발견과 훅 어댑터 구현, 2.1.70 SessionStart 실동작 확인 |
-| Codex | `codex` | 프로세스 발견 구현, 상세 훅 연결은 후속 작업 |
-| Cursor CLI | `agent` | 프로세스 발견 구현, 실제 실행 발견 확인, 상세 상태는 후속 작업 |
-| Gemini 프로필 | `agy` | Gemini 이름으로 프로세스 발견 구현, 실동작 검증은 후속 작업 |
+| Claude | `claude` | 프로세스 발견·훅·화면 어댑터 구현, 2.1.70 SessionStart 실동작 확인 |
+| Codex | `codex` | 프로세스 발견·화면 어댑터 구현, 상세 훅 연결은 후속 작업 |
+| Cursor CLI | `agent` | 프로세스 발견·화면 어댑터 구현, 실제 실행 발견 확인, 전체 대화 흐름 검증은 후속 작업 |
+| Gemini 프로필 | `agy` | Gemini 이름으로 프로세스 발견·화면 어댑터 구현, 전체 대화 흐름 검증은 후속 작업 |
 | Hermes | `hermes` | 프로세스 발견 구현, 상세 상태와 실동작 검증은 후속 작업 |
 | Pi | 미등록 | 도구 실체와 실행 방식 확인 후 별도 추가 |
 
@@ -61,7 +61,7 @@
 | 참조 소스 | 활용할 동작 |
 |---|---|
 | [기존 키와 화면 상태](/Users/in05908_mac/zellij-with-codeagent/internal/agentdashboard/model.go) | 기능, 선택과 화면 수명 |
-| [기존 상태 판별](/Users/in05908_mac/zellij-with-codeagent/internal/codingagent/detector.go) | 화면 탐지의 보완 경로 |
+| [기존 상태 판별](/Users/in05908_mac/zellij-with-codeagent/internal/codingagent/detector.go) | 훅 미연결 실행의 화면 감지 경로 |
 | [기존 Monitor](/Users/in05908_mac/zellij-with-codeagent/internal/codingagent/monitor.go) | 세대 검증과 상태 변화 |
 | [도구 프로필](/Users/in05908_mac/zellij-with-codeagent/internal/codingagent/profile.go) | 실행 파일과 도구 구분 |
 | [기존 백그라운드 bridge](/Users/in05908_mac/zellij-with-codeagent/plugins/agent-next-bridge/src/main.rs) | 권한과 다중 클라이언트 처리 참고 |

@@ -50,7 +50,7 @@ impl LockedStore {
             }
         }
         let path = dir.join("store.json");
-        let store = if path.exists() {
+        let mut store = if path.exists() {
             let mut bytes = Vec::new();
             File::open(path)
                 .map_err(|e| e.to_string())?
@@ -65,7 +65,7 @@ impl LockedStore {
         } else {
             Store::default()
         };
-        store.check_version()?;
+        store.migrate()?;
         Ok(Self {
             _lock: lock,
             dir: dir.into(),

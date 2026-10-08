@@ -3,7 +3,7 @@ use crate::{
     process,
     terminal::{SessionId, TerminalPane},
 };
-use dashboard_core::{Agent, Liveness, PaneInfo, PaneOutput, Store};
+use dashboard_core::{Agent, Liveness, PaneInfo, PaneOutput, StatusSource, Store};
 use std::{
     collections::BTreeSet,
     time::{Duration, Instant},
@@ -24,7 +24,7 @@ fn apply_metadata(store: &mut Store, session: &str, panes: &[TerminalPane]) {
                 tab_name: pane.tab_name.clone(),
                 title: pane.title.clone(),
             };
-            if agent.last_report_ms.is_none() {
+            if agent.status_source != StatusSource::Hook {
                 if let Some(cwd) = pane.cwd.as_ref().filter(|s| !s.is_empty()) {
                     agent.cwd.clone_from(cwd);
                 }
@@ -33,7 +33,8 @@ fn apply_metadata(store: &mut Store, session: &str, panes: &[TerminalPane]) {
     }
 }
 
-pub fn refresh_metadata(store: &mut Store, deps: &HostDependencies) {
+pub fn refresh_metadata(store: &mut Store, deps: &HostDependencies) -> BTreeSet<String> {
+    let mut fresh = BTreeSet::new();
     let sessions: BTreeSet<_> = store
         .agents
         .values()
@@ -53,9 +54,21 @@ pub fn refresh_metadata(store: &mut Store, deps: &HostDependencies) {
         );
         // Missing/older session servers must not invalidate a successful ps scan.
         if let Ok(panes) = result {
+            fresh.extend(
+                store
+                    .agents
+                    .values()
+                    .filter(|a| {
+                        a.liveness == Liveness::Live
+                            && a.identity.session_name == session
+                            && panes.iter().any(|p| p.id == pane_id(a.identity.pane_id))
+                    })
+                    .map(|a| a.identity.agent_id.clone()),
+            );
             apply_metadata(store, &session, &panes);
         }
     }
+    fresh
 }
 
 pub fn preview(agent: &Agent, deps: &HostDependencies) -> Result<PaneOutput, String> {
@@ -105,7 +118,7 @@ mod tests {
             }],
             1000,
         );
-        let panes = vec![TerminalPane {
+        let mut panes = vec![TerminalPane {
             id: pane_id(3),
             tab_id: Some(2),
             tab_name: "Development".into(),
@@ -116,6 +129,11 @@ mod tests {
         assert_eq!(store.agents["a"].pane.tab_id, Some(2));
         assert_eq!(store.agents["a"].cwd, "/actual");
         store.agents.get_mut("a").unwrap().last_report_ms = Some(1000);
+        store.agents.get_mut("a").unwrap().status_source = StatusSource::Screen;
+        panes[0].cwd = Some("/screen-project".into());
+        apply_metadata(&mut store, "한글 세션", &panes);
+        assert_eq!(store.agents["a"].cwd, "/screen-project");
+        store.agents.get_mut("a").unwrap().status_source = StatusSource::Hook;
         store.agents.get_mut("a").unwrap().cwd = "/hook".into();
         apply_metadata(&mut store, "한글 세션", &panes);
         assert_eq!(store.agents["a"].cwd, "/hook");
