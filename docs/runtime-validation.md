@@ -129,3 +129,11 @@ DB 구조 버전은 2이며 버전 1의 요청 JSON에서 시각을 채우고 �
 수동 실험 `cargo test -p dashboard-host repository_transaction_cost_with_request_history -- --ignored --nocapture`에서 요청 0개/4,000개(메시지 4 KiB), 수집 예약 획득+해제 두 트랜잭션의 중앙값을 12회씩 측정했다. debug 빌드의 전체 조회 scope는 0.729/192.637ms, runtime scope는 0.657/1.268ms였다. 현재 코드의 두 scope를 비교한 값이며 이전 바이너리와의 성능 배수로 해석하지 않는다. 측정 로그는 `.local/benchmark-transactions.log`다.
 
 release CLI 스냅샷 조회도 다시 12회씩 측정했다. 이전 host의 요청 0개/4,000개 중앙값은 4.455/16.527ms, 최종 host는 3.678/3.538ms였다. 에이전트가 없는 격리 상태이며 프로세스 시작을 포함한 로컬 측정이다. 결과는 `.local/repository-benchmark-04495774b9/result.json`이다.
+
+## 2026-10-08 h/l 고정·일반 영역 이동
+
+`h`/왼쪽 방향키는 PINNED, `l`/오른쪽 방향키는 UNPINNED 영역을 선택한다. 같은 방향을 반복 입력해도 해당 영역에 머물며 영역별 선택을 유지한다. `Tab` 전환은 유지하고 좁은 화면에서도 선택 영역을 표시한다. 검색·메뉴 입력 중에는 기존 문자 입력 처리를 유지한다.
+
+`./scripts/check.sh`에서 코어 27개·호스트 48개, 총 75개 테스트와 포맷·네이티브/WASI Clippy·스크립트 구문 검사를 통과했다. 영역별 선택 복원 테스트에 같은 영역 재선택을 추가했고 `./scripts/build.sh`로 release host/WASM을 빌드했다.
+
+`python3 scripts/smoke.py`를 임시 Zellij 세션 두 개에서 통과했다. 실제 키 입력으로 `hh`의 고정 영역 유지, `ll`의 빈 일반 영역 유지, `h`의 선택 복원과 고정 해제 후 `l`의 일반 영역 선택을 확인했다. 기존 입력·종료·세션 이동·detach·reload·SQLite 검증도 통과했다. 결과는 `.local/smoke-70e0af5fcf/result.json`이다. 테스트 세션과 프로세스는 정리했으며 운영 세션에는 설치·reload를 적용하지 않았다.

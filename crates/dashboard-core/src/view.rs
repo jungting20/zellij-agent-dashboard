@@ -136,9 +136,13 @@ impl View {
     }
 
     pub fn toggle_panel(&mut self, snapshot: &Snapshot) {
+        self.focus_panel(snapshot, !self.pinned_only);
+    }
+
+    pub fn focus_panel(&mut self, snapshot: &Snapshot, pinned: bool) {
         self.selections[usize::from(self.pinned_only)] = self.selected_id.clone();
-        self.pinned_only = !self.pinned_only;
-        self.selected_id = self.selections[usize::from(self.pinned_only)].clone();
+        self.pinned_only = pinned;
+        self.selected_id = self.selections[usize::from(pinned)].clone();
         self.reconcile_selection(snapshot);
     }
 
@@ -339,9 +343,9 @@ impl View {
         let footer = vec![
             Line::color(rule, color, false),
             Line::plain(if width >= 75 {
-                "p 지시 n 새 실행 i 입력 I 에디터 g worktree m 병합 a 태그 Space pin d 종료 Enter 이동 R 갱신 q 닫기"
+                "h/l 영역 p 지시 n 새 실행 i 입력 I 에디터 g worktree m 병합 a 태그 Space pin d 종료 Enter 이동 R 갱신 q 닫기"
             } else {
-                "Tab 영역 Space pin Enter focus / 검색 p 지시 q quit"
+                "h/l 영역 Tab 전환 Space pin Enter focus / 검색 q quit"
             }),
         ];
         if height < 3 {
@@ -913,9 +917,13 @@ mod tests {
         view.toggle_panel(&snapshot);
         view.select(&snapshot, 1);
         let pinned = view.selected_id.clone();
-        view.toggle_panel(&snapshot);
+        view.focus_panel(&snapshot, false);
         assert_eq!(view.selected_id, unpinned);
-        view.toggle_panel(&snapshot);
+        view.focus_panel(&snapshot, false);
+        assert_eq!(view.selected_id, unpinned);
+        view.focus_panel(&snapshot, true);
+        assert_eq!(view.selected_id, pinned);
+        view.focus_panel(&snapshot, true);
         assert_eq!(view.selected_id, pinned);
         let wide = view
             .render_plain(&snapshot, 24, 120, "Connected")

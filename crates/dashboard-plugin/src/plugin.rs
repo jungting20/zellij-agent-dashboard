@@ -213,6 +213,16 @@ impl Dashboard {
                     self.view.toggle_panel(snapshot);
                 }
             }
+            BareKey::Left | BareKey::Char('h') => {
+                if let Some(snapshot) = self.snapshot.as_ref() {
+                    self.view.focus_panel(snapshot, true);
+                }
+            }
+            BareKey::Right | BareKey::Char('l') => {
+                if let Some(snapshot) = self.snapshot.as_ref() {
+                    self.view.focus_panel(snapshot, false);
+                }
+            }
             BareKey::Char(' ') if self.permissions => self.pin(),
             BareKey::Char('p') => {
                 if let Some(snapshot) = self.snapshot.as_ref() {

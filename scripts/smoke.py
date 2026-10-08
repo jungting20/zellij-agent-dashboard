@@ -310,6 +310,29 @@ fn main() {
         os.write(clients[0].fd, f"/{sessions[1]}\r".encode())
         wait_for("keyboard search selects requested agent", lambda: any(p["selected_id"] == target["identity"]["agent_id"]
                  and p["query"] == sessions[1] for p in ping(first, "dashboard")))
+        host_call("pin", target["identity"]["agent_id"], "true")
+        wait_for("selected agent moves to pinned rows", lambda: any(
+            a["pinned"] and a["identity"]["agent_id"] == target["identity"]["agent_id"]
+            for a in host_call("snapshot")["agents"]))
+        def panel_matches(pinned, selected):
+            return any(p["pinned_panel"] == pinned and p["selected_id"] == selected
+                       and p["query"] == sessions[1] for p in ping(first, "dashboard"))
+        os.write(clients[0].fd, b"hh")
+        wait_for("h selects pinned panel and repeated h stays there",
+                 lambda: panel_matches(True, target["identity"]["agent_id"]))
+        os.write(clients[0].fd, b"ll")
+        wait_for("l selects empty unpinned panel and repeated l stays there",
+                 lambda: panel_matches(False, None))
+        os.write(clients[0].fd, b"h")
+        wait_for("h restores pinned selection",
+                 lambda: panel_matches(True, target["identity"]["agent_id"]))
+        host_call("pin", target["identity"]["agent_id"], "false")
+        wait_for("selected agent returns to unpinned rows", lambda: any(
+            not a["pinned"] and a["identity"]["agent_id"] == target["identity"]["agent_id"]
+            for a in host_call("snapshot")["agents"]))
+        os.write(clients[0].fd, b"l")
+        wait_for("l selects unpinned agent",
+                 lambda: panel_matches(False, target["identity"]["agent_id"]))
         os.write(clients[0].fd, b"\r")
         wait_for("Enter focuses agent in other session", lambda: len(attached(first)) < source_clients
                  and any(row[1] == f'terminal_{target["identity"]["pane_id"]}' for row in attached(sessions[1])))

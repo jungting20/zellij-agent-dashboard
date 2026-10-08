@@ -35,7 +35,7 @@ export ZAD_STATE_DIR="$PWD/.local/state"
 
 상태는 기본적으로 `${XDG_STATE_HOME:-$HOME/.local/state}/zellij-agent-dashboard/store.sqlite3`에 저장한다. Repository 계층을 통해 SQLite를 사용하며 네이티브 host에 SQLite 라이브러리를 포함하므로 별도 DB 서버나 SQLite CLI 설치는 필요하지 않다. 기존 `store.json`은 최초 실행에 자동 이관하고 원본을 보존한다. 업그레이드 전에 이전 host를 사용하는 collector와 훅을 중단한다. 백업·복구와 버전 정책은 [공유 상태 문서](docs/architecture.md#공유-상태와-동시성)를 참고한다.
 
-화면 키는 `j/k`, 방향키, 숫자 `1–9` 선택, `/` 검색, `R` 새로고침, `Enter` pane 이동, `q` 닫기다. `Tab`은 고정/일반 영역을 전환하며 각 영역의 선택을 유지한다. `Space` 고정 변경, `a` 별칭, `i` 입력, `d` 종료, `n` 새 실행, `p` 마지막 지시, `I` 외부 에디터, `g` worktree 메뉴, `m` 병합 지시, `u` 최근 조작 결과를 제공한다. 보조 메뉴 전체 흐름의 실제 검증은 남아 있다.
+화면 키는 `j/k`, 방향키, 숫자 `1–9` 선택, `/` 검색, `R` 새로고침, `Enter` pane 이동, `q` 닫기다. `h`/`←`는 고정 영역, `l`/`→`는 일반 영역으로 이동한다. `Tab`은 두 영역을 전환하며 각 영역의 선택을 유지한다. `Space` 고정 변경, `a` 별칭, `i` 입력, `d` 종료, `n` 새 실행, `p` 마지막 지시, `I` 외부 에디터, `g` worktree 메뉴, `m` 병합 지시, `u` 최근 조작 결과를 제공한다. 보조 메뉴 전체 흐름의 실제 검증은 남아 있다.
 
 Claude, Codex, Cursor CLI(`agent`), Gemini(`agy`/`gemini`), Hermes와 Pi(`pi` 또는 Node의 `pi-coding-agent`) 발견 코드를 제공한다. 도구별 실제 검증 범위는 기능 이관표를 따른다. 상세 훅 어댑터는 현재 Claude만 제공한다. Claude, Codex, Gemini, Cursor는 훅이 없으면 화면 규칙으로 상태를 판별한다. Hermes와 Pi는 화면 규칙이 없어 `found`로 표시한다. 훅 없는 경로 정보는 프로세스가 상속한 `PWD`나 확인한 pane 메타데이터를 사용한다.
 
