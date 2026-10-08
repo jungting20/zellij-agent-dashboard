@@ -110,6 +110,28 @@ def main():
     (config / "config.kdl").write_text(f'''default_layout "test"
 show_startup_tips false
 show_release_notes false
+keybinds {{
+    shared_except "locked" {{
+        bind "Alt u" {{
+            MessagePlugin "file:{wasm}" {{
+                mode "collector"
+                host_path "{host}"
+                state_dir "{state}"
+                name "agent-next"
+                payload "pinned-only"
+            }}
+        }}
+        bind "Alt i" {{
+            MessagePlugin "file:{wasm}" {{
+                mode "collector"
+                host_path "{host}"
+                state_dir "{state}"
+                name "agent-next"
+                payload "idle-and-pinned"
+            }}
+        }}
+    }}
+}}
 load_plugins {{
     "file:{wasm}" {{
         mode "collector"
@@ -131,7 +153,7 @@ load_plugins {{
             environment.pop(key, None)
         result = subprocess.run([zellij, "--session", session, *command], env=environment, stdin=subprocess.DEVNULL,
                                 capture_output=True, text=True, timeout=timeout)
-        if result.returncode:
+        if result.returncode and "already focused" not in result.stderr:
             raise RuntimeError(f"Zellij {command[0]} failed: {result.stderr.strip()}")
         return result.stdout
 
@@ -158,6 +180,7 @@ load_plugins {{
             except (RuntimeError, subprocess.TimeoutExpired, FileNotFoundError) as error:
                 last_error = str(error)
             time.sleep(0.1)
+        (directory / "navigation-debug.json").write_text(json.dumps(ping(sessions[0]), indent=2))
         (directory / "terminal.log").write_text("\n".join(c.capture for c in clients))
         if description.startswith("Enter focuses"):
             diagnostics = {}
@@ -285,6 +308,89 @@ fn main() {
         wait_for("host adapter sends multiline input", lambda: "second line" in input_log.read_text())
         assert input_log.read_text().count("한글 첫 줄") == 1
         print("PASS duplicate input does not repeat delivery", flush=True)
+        # Tab selects working rows across panels, without leaving the dashboard.
+        show_fixture(":working")
+        wait_for("screen working for Tab navigation", lambda: current_screen_row()["status"] == "working")
+        fixture_pane = f'terminal_{agent["identity"]["pane_id"]}'
+        call(first, "action", "write-chars", "--pane-id", fixture_pane, ":working")
+        call(first, "action", "write", "--pane-id", fixture_pane, "13")
+        host_call("pin", agent["identity"]["agent_id"], "true")
+        wait_for("second working fixture", lambda: next(a for a in host_call("snapshot")["agents"]
+                 if a["identity"] == agent["identity"])["status"] == "working")
+        tab_ui = call(first, "plugin", "--configuration", f"mode=dashboard,{base_config}", "--", f"file:{wasm}").strip()
+        wait_for("Tab dashboard loaded", lambda: any(p["permissions"] for p in ping(first, "dashboard")))
+        os.write(clients[0].fd, f"/{first}\r".encode())
+        wait_for("Tab query scoped to temporary session", lambda: any(p["query"] == first for p in ping(first, "dashboard")))
+        tab_client = next(p["client_id"] for p in ping(first, "dashboard") if p["query"] == first)
+        os.write(clients[0].fd, b"h")
+        wait_for("Tab anchor in pinned panel", lambda: any(p["query"] == first and p["selected_id"] == agent["identity"]["agent_id"]
+                 for p in ping(first, "dashboard")))
+        os.write(clients[0].fd, b"\t")
+        wait_for("Tab selects working agent across panels", lambda: any(p["query"] == first and not p["pinned_panel"]
+                 and p["selected_id"] == screen_row["identity"]["agent_id"] for p in ping(first, "dashboard")))
+        os.write(clients[0].fd, b"\t")
+        wait_for("Tab wraps to pinned working agent", lambda: any(p["query"] == first and p["pinned_panel"]
+                 and p["selected_id"] == agent["identity"]["agent_id"] for p in ping(first, "dashboard")))
+        call(first, "action", "close-pane", "--pane-id", tab_ui)
+        # Only these two owned agents are pinned in this isolated state.
+        host_call("pin", screen_row["identity"]["agent_id"], "true")
+        call(first, "action", "focus-pane-id", fixture_pane)
+        def client_panes(session):
+            return {int(line.split()[0]): line.split()[1] for line in call(session, "action", "list-clients").splitlines()
+                    if re.match(r"^\d+\s+", line)}
+        before_navigation = client_panes(first)
+        os.write(clients[0].fd, b"\x1bu")
+        wait_for("global agent-next works without dashboard", lambda: client_panes(first).get(tab_client) == f'terminal_{screen_row["identity"]["pane_id"]}')
+        assert all(pane == before_navigation[cid] for cid, pane in client_panes(first).items() if cid != tab_client)
+        print("PASS global navigation leaves other client focus unchanged", flush=True)
+        os.write(clients[0].fd, b"\x1bu")
+        wait_for("global agent-next wraps using actual focus", lambda: client_panes(first).get(tab_client) == fixture_pane)
+        before_messages = max(p["next_messages"] for p in ping(first))
+        os.write(clients[0].fd, b"\x1bu\x1bu")
+        wait_for("rapid global keys each advance once", lambda: any(p["client_id"] == tab_client
+                 and p["next_messages"] >= before_messages + 2 and not p["next_pending"] and not p.get("next_check_pending", False)
+                 and p.get("next_queued", 0) == 0 for p in ping(first))
+                 and client_panes(first).get(tab_client) == fixture_pane)
+        call(first, "action", "write-chars", "--pane-id", fixture_pane, ":idle")
+        call(first, "action", "write", "--pane-id", fixture_pane, "13")
+        wait_for("idle fixture for global filter", lambda: next(a for a in host_call("snapshot")["agents"]
+                 if a["identity"] == agent["identity"])["status"] == "idle")
+        call(first, "action", "focus-pane-id", f'terminal_{screen_row["identity"]["pane_id"]}')
+        os.write(clients[0].fd, b"\x1bi")
+        wait_for("global idle-and-pinned skips working agent", lambda: client_panes(first).get(tab_client) == fixture_pane)
+        other_agent = next(a for a in rows if a["identity"]["session_name"] == sessions[1])
+        host_call("pin", other_agent["identity"]["agent_id"], "true")
+        host_call("pin", agent["identity"]["agent_id"], "false")
+        first_hop = host_call("next", json.dumps({"filter": "pinned-only", "session": first,
+                                                  "pane_id": agent["identity"]["pane_id"]}))
+        second_hop = host_call("next", json.dumps({"filter": "pinned-only", "session": first_hop["identity"]["session_name"],
+                                                   "pane_id": first_hop["identity"]["pane_id"]}))
+        assert first_hop["identity"]["session_name"] == sessions[1]
+        assert second_hop["identity"]["session_name"] == first
+        before_messages = max(p["next_messages"] for p in ping(first))
+        os.write(clients[0].fd, b"\x1bu\x1bu")
+        wait_for("rapid keys finish cross-session cycle before switching", lambda: any(p["client_id"] == tab_client
+                 and p["next_messages"] >= before_messages + 2 and not p["next_pending"]
+                 and not p.get("next_check_pending", False) and p.get("next_queued", 0) == 0 for p in ping(first))
+                 and client_panes(first).get(tab_client) == f'terminal_{second_hop["identity"]["pane_id"]}')
+        host_call("pin", other_agent["identity"]["agent_id"], "false")
+        host_call("pin", screen_row["identity"]["agent_id"], "false")
+        host_call("pin", agent["identity"]["agent_id"], "false")
+        for next_filter in ("unpinned-only", "idle-and-unpinned"):
+            next_row = host_call("next", json.dumps({"filter": next_filter, "session": first,
+                                                     "pane_id": agent["identity"]["pane_id"]}))
+            assert next_row and not next_row["pinned"]
+            if next_filter == "idle-and-unpinned":
+                assert next_row["status"] == "idle"
+        print("PASS host next unpinned and idle-unpinned filters", flush=True)
+        before_messages = max(p["next_messages"] for p in ping(first))
+        before_navigation = client_panes(first)
+        os.write(clients[0].fd, b"\x1bu")
+        wait_for("empty pinned filter completes", lambda: any(p["client_id"] == tab_client
+                 and p["next_messages"] > before_messages and not p["next_pending"] and not p.get("next_check_pending", False)
+                 and p.get("next_queued", 0) == 0 for p in ping(first)))
+        assert client_panes(first) == before_navigation
+        print("PASS no matching global target preserves focus", flush=True)
         close_request = {"request_id": "adapter-close", "action": {"kind": "close", "target": agent["identity"]}}
         assert host_action(close_request)["state"] == "succeeded"
         assert host_action(close_request)["state"] == "succeeded"
@@ -421,7 +527,11 @@ fn main() {
             assert metadata["revision"] >= 17
             assert database.execute("SELECT count(*) FROM agents").fetchone()[0] >= 2
         print("PASS SQLite persistence, integrity and preserved JSON import", flush=True)
-        (directory / "result.json").write_text(json.dumps({"passed":True, "sessions":sessions, "real_claude":args.real_claude, "screen_adapter":True, "sqlite_repository":True, "legacy_import":True, "pane_presence":True}, indent=2))
+        source_clients = len(attached(first))
+        os.write(clients[-1].fd, b"\x1bu")
+        wait_for("global agent-next crosses sessions after detach and reload", lambda: len(attached(first)) < source_clients
+                 and any(row[1] == f'terminal_{target["identity"]["pane_id"]}' for row in attached(sessions[1])))
+        (directory / "result.json").write_text(json.dumps({"passed":True, "sessions":sessions, "real_claude":args.real_claude, "screen_adapter":True, "sqlite_repository":True, "legacy_import":True, "pane_presence":True, "agent_next":True, "working_tab":True}, indent=2))
         print(f"Artifacts: {directory}", flush=True)
     finally:
         for fixture in background_fixtures:

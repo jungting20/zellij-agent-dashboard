@@ -137,3 +137,23 @@ release CLI 스냅샷 조회도 다시 12회씩 측정했다. 이전 host의 요
 `./scripts/check.sh`에서 코어 27개·호스트 48개, 총 75개 테스트와 포맷·네이티브/WASI Clippy·스크립트 구문 검사를 통과했다. 영역별 선택 복원 테스트에 같은 영역 재선택을 추가했고 `./scripts/build.sh`로 release host/WASM을 빌드했다.
 
 `python3 scripts/smoke.py`를 임시 Zellij 세션 두 개에서 통과했다. 실제 키 입력으로 `hh`의 고정 영역 유지, `ll`의 빈 일반 영역 유지, `h`의 선택 복원과 고정 해제 후 `l`의 일반 영역 선택을 확인했다. 기존 입력·종료·세션 이동·detach·reload·SQLite 검증도 통과했다. 결과는 `.local/smoke-70e0af5fcf/result.json`이다. 테스트 세션과 프로세스는 정리했으며 운영 세션에는 설치·reload를 적용하지 않았다.
+
+## 2026-10-08 전역 agent next와 Tab working 순환
+
+별도 bridge를 추가하지 않고 같은 WASM의 collector가 `agent-next`를 처리하도록 구현했다. 네 전역 키 필터와 `all`·`working-only`를 지원한다. 순환 선택은 표시 순서·부모 고정 상속을 공유하고 호스트에서 정확한 실행 세대와 pane을 재검증한다. 대시보드 `Tab`은 검색 결과의 양쪽 패널에서 살아 있는 working 에이전트만 선택하며 패널 이동은 `h/l`·`←/→`로 제공한다. 상태 파일 구조 변경은 없다.
+
+`./scripts/check.sh`에서 코어 29개·호스트 49개, 총 78개 테스트와 포맷·네이티브/WASI Clippy·스크립트 구문 검사를 통과했다. 수동 성능 테스트 1개는 기존처럼 제외했다. `./scripts/build.sh`의 release host·wasm32-wasip1 빌드를 통과했다. 새 테스트는 정확한 idle, 부모 고정 상속, working 패널 간 순환과 빈 결과 보존, 종료·미확인·부재 pane 제외, 후보의 실행 세대 교체와 부재 시 이동 거부를 확인한다.
+
+Zellij 0.45.0에서 `python3 scripts/smoke.py`를 통과했다. 결과는 `.local/smoke-6e5b9f09b0/result.json`, 로그는 `.local/agent-next-smoke-final.log`다. 실제 Tab 입력으로 working 선택·패널 이동·순환을 확인했다. 대시보드 없이 Alt+u의 순환, Alt+i의 idle 고정 필터, 같은 세션과 세션 경계를 포함한 연속 키, 빈 필터의 초점 보존, 다른 클라이언트 초점 유지, 전체 detach·재연결·collector reload 뒤 전역 키의 세션 간 이동을 확인했다. unpinned·idle-unpinned는 코어 및 실제 호스트 `next` 조회로 검증했으며 Alt+o/p의 실제 키 입력은 이 실행에서 별도로 검증하지 않았다. 기존 수집·상태·입력·종료·중복·세션 이동·SQLite 검증도 통과했고 임시 세션과 프로세스를 정리했다. 실제 Claude 옵션은 이번 변경에서 실행하지 않았다.
+
+초기 검증에서 collector의 ModeUpdate에는 세션 이름이 없었고 전역 키의 private 메시지가 여러 클라이언트 인스턴스에 전달되는 것을 확인했다. 실제 세션은 세션 목록에서, 초점 pane과 연결된 클라이언트는 ListClients로 조회한다. 연결된 최소 ID의 클라이언트 하나만 요청을 처리하며 detach된 인스턴스와 다른 클라이언트의 큐는 버린다. 키 입력자 ID는 Zellij의 PipeMessage 계약에 없어 다중 클라이언트에서는 처리 클라이언트의 초점만 이동한다. 세션 이동 중 연속 키가 유실되지 않도록 대기 중인 순환을 끝낸 뒤 최종 대상으로 초점을 이동한다.
+
+명시적으로 요청한 `/Users/in05908_mac/.config/zellij/config.kdl`의 Alt+u/i/o/p와 load_plugins를 이 프로젝트의 dist WASM·host·상태 경로로 교체하고 설정 검사를 통과했다. 백업은 `/Users/in05908_mac/.config/zellij/config.kdl.backup-20261008-agent-next-4ef2b83e`다. 실행 중 운영 세션에 강제 reload는 적용하지 않았다. 기존 Alt+q의 CLI 대시보드 실행 설정은 이번 bridge 교체 범위에 포함하지 않았다.
+
+## 2026-10-08 Alt+q 최초 창 크기와 임시 창 제거
+
+`agent-dashboard-open` private 메시지를 collector가 처리하고 연결된 최소 ID 클라이언트가 유한한 `dashboard-host open-dashboard SESSION` 명령을 실행한다. 호스트 어댑터는 기존 floating dashboard가 있으면 재사용하고, 없으면 `zellij plugin --width 90% --height 90% --x 5% --y 5%`로 생성한다. terminal 보조 pane과 생성 후 resize 단계를 제거했다. 세션별 파일 잠금과 collector의 진행 중 요청 억제로 중복 생성을 제한한다. 상태 파일 구조는 변경하지 않았다.
+
+`./scripts/check.sh`에서 코어 29개·호스트 50개 테스트, 포맷·네이티브/WASI Clippy와 스크립트 구문 검사를 통과했고 release host/WASM을 빌드했다. Zellij 0.45.0 임시 세션 `zad-window-manual-test`의 80×24 화면에서 Alt+q로 72×21 창을 생성하고 반복 입력 시 같은 pane 재사용, terminal pane 추가 없음, 두 클라이언트에서 중복 없음, collector reload 뒤 재열기를 확인했다. 테스트 세션은 종료했다.
+
+전체 `scripts/smoke.py` 재실행은 임시 클라이언트 시작·권한 승인 자동화에서 시간 초과되어 완료되지 않았다. 기록은 `.local/smoke-6f748963cf`와 `.local/smoke-80659fec63`이다. 이 실행을 전체 회귀 검증 통과로 기록하지 않는다. 사용자 요청에 따라 전역 Alt+q 설정을 교체하고 현재 세션 `운영`의 collector에만 reload를 적용했다. 연결된 클라이언트가 없어 검증용 클라이언트를 잠시 붙여 reload와 permissions=true 응답을 확인한 뒤 detach했다.

@@ -12,6 +12,81 @@ pub struct ZellijCli<'a> {
 }
 
 impl<'a> ZellijCli<'a> {
+    pub fn open_dashboard(
+        &self,
+        session: &SessionId,
+        wasm: &std::path::Path,
+        host: &std::path::Path,
+        state: &std::path::Path,
+    ) -> Result<(), String> {
+        for path in [wasm, host, state] {
+            if !path.is_absolute() || path.to_string_lossy().contains(',') {
+                return Err("dashboard paths must be absolute and cannot contain commas".into());
+            }
+        }
+        let url = format!("file:{}", wasm.display());
+        let configuration = format!(
+            "mode=dashboard,host_path={},state_dir={}",
+            host.display(),
+            state.display()
+        );
+        let bytes = self.action(
+            session,
+            vec!["list-panes".into(), "--json".into()],
+            Duration::from_millis(1200),
+            1024 * 1024,
+        )?;
+        let panes: Vec<CliPane> = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        if panes.iter().any(|pane| {
+            pane.is_plugin
+                && pane.is_floating
+                && !pane.is_suppressed
+                && pane.plugin_url.as_deref() == Some(&url)
+        }) {
+            self.action(
+                session,
+                vec![
+                    "launch-or-focus-plugin".into(),
+                    url.into(),
+                    "--floating".into(),
+                    "--move-to-focused-tab".into(),
+                    "--configuration".into(),
+                    configuration.into(),
+                ],
+                Duration::from_secs(5),
+                128 * 1024,
+            )?;
+        } else {
+            command::output(
+                self.runner,
+                CommandSpec::new(
+                    self.executable.clone(),
+                    Some(Duration::from_secs(5)),
+                    128 * 1024,
+                )
+                .args([
+                    "--session",
+                    &session.0,
+                    "plugin",
+                    "--floating",
+                    "--x",
+                    "5%",
+                    "--y",
+                    "5%",
+                    "--width",
+                    "90%",
+                    "--height",
+                    "90%",
+                    "--configuration",
+                    &configuration,
+                    "--",
+                    &url,
+                ]),
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn new(executable: impl Into<OsString>, runner: &'a dyn CommandRunner) -> Self {
         Self {
             executable: executable.into(),
@@ -60,6 +135,12 @@ impl<'a> ZellijCli<'a> {
 struct CliPane {
     id: u32,
     is_plugin: bool,
+    #[serde(default)]
+    is_floating: bool,
+    #[serde(default)]
+    is_suppressed: bool,
+    #[serde(default)]
+    plugin_url: Option<String>,
     #[serde(default)]
     tab_id: Option<u32>,
     #[serde(default)]
@@ -362,5 +443,36 @@ mod tests {
             .close_pane(&SessionId("dev".into()), &pane_id(7))
             .unwrap_err()
             .contains("timed out"));
+    }
+
+    #[test]
+    fn dashboard_is_created_at_full_size_and_existing_window_is_reused() {
+        let runner = RecordingRunner::new(br#"[{"id":0,"is_plugin":true,"is_suppressed":true,"plugin_url":"file:/app/agent-dashboard.wasm"}]"#);
+        let host = ZellijCli::new("zellij", &runner);
+        let session = SessionId("dev".into());
+        let wasm = std::path::Path::new("/app/agent-dashboard.wasm");
+        let executable = std::path::Path::new("/app/dashboard-host");
+        let state = std::path::Path::new("/state");
+        host.open_dashboard(&session, wasm, executable, state)
+            .unwrap();
+        let args = argv(&runner);
+        assert_eq!(args[2], "plugin");
+        assert!(args.windows(2).any(|a| a == ["--width", "90%"]));
+        assert!(args.windows(2).any(|a| a == ["--height", "90%"]));
+        assert_eq!(runner.calls.borrow().len(), 2);
+
+        runner.calls.borrow_mut().clear();
+        *runner.response.borrow_mut() = Ok(br#"[{"id":4,"is_plugin":true,"is_floating":true,"plugin_url":"file:/app/agent-dashboard.wasm"}]"#.to_vec());
+        host.open_dashboard(&session, wasm, executable, state)
+            .unwrap();
+        assert_eq!(argv(&runner)[3], "launch-or-focus-plugin");
+        assert_eq!(runner.calls.borrow().len(), 2);
+
+        runner.calls.borrow_mut().clear();
+        *runner.response.borrow_mut() = Ok(b"invalid inventory".to_vec());
+        assert!(host
+            .open_dashboard(&session, wasm, executable, state)
+            .is_err());
+        assert_eq!(runner.calls.borrow().len(), 1);
     }
 }

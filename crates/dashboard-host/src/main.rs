@@ -83,6 +83,44 @@ fn run(
     };
     let command = args.first().map(String::as_str).unwrap_or("help");
     match command {
+        "open-dashboard" => {
+            let session = args
+                .get(1)
+                .ok_or("open-dashboard requires a session name")?;
+            let executable = env::current_exe().map_err(|e| e.to_string())?;
+            let wasm = executable.with_file_name("agent-dashboard.wasm");
+            if !wasm.is_file() {
+                return Err(format!("dashboard plugin not found: {}", wasm.display()));
+            }
+            // One finite command owns opening a window, including concurrent
+            // requests from old/reloaded collector instances in this session.
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            use std::hash::{Hash, Hasher};
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            session.hash(&mut hash);
+            let lock = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(dir.join(format!("dashboard-window-{:x}.lock", hash.finish())))
+                .map_err(|e| e.to_string())?;
+            if fs2::FileExt::try_lock_exclusive(&lock).is_err() {
+                return Ok(());
+            }
+            zellij::ZellijCli::new("zellij", runner).open_dashboard(
+                &terminal::SessionId(session.clone()),
+                &wasm,
+                &executable,
+                &dir,
+            )
+        }
+        "next" => {
+            let request = serde_json::from_str::<dashboard_core::NextRequest>(
+                args.get(1).ok_or("next requires a JSON request")?,
+            )
+            .map_err(|e| format!("invalid next request: {e}"))?;
+            json(&actions::next_agent(&request, deps)?)
+        }
         "requests" => json(&deps.repository.recent_requests(50)?),
         "catalog" => json(&actions::catalog(deps)?),
         "action" => {
@@ -99,7 +137,7 @@ fn run(
             deps,
         )?),
         "help" | "--help" => {
-            println!("dashboard-host [--state-dir /path] <scan|snapshot|resolve ID|pin ID true/false|preview ID|hook --tool claude|hook-config>");
+            println!("dashboard-host [--state-dir /path] <scan|snapshot|next JSON|resolve ID|pin ID true/false|preview ID|hook --tool claude|hook-config>");
             Ok(())
         }
         "hook-config" => json(&hooks::claude_config(

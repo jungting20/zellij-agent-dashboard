@@ -108,6 +108,12 @@ Claude 훅은 현재 pane의 실제 Claude 프로세스가 자신의 조상인�
 
 플러그인은 RunCommands, ReadApplicationState, ChangeApplicationState, ReadCliPipes 권한을 요청한다. 명시적 거절 뒤에는 반복 요청하지 않고 재로딩으로 다시 시작한다. CLI pipe 입출력에도 별도의 ReadCliPipes 권한이 필요하다.
 
-Enter는 보조 명령으로 현재 프로세스를 다시 검증한 뒤 `switch_session_with_focus`를 호출한다. 입력·종료·실행과 보조 메뉴의 외부 조작도 호스트를 경유한다. 요청 ID와 내용을 실행 전에 저장하고 결과를 실행 후 기록한다. 중복 요청은 기존 결과를 반환하며, pending이나 결과가 불명확한 조작을 자동 재전송하지 않는다. 실제 검증은 호스트 fixture 조작을 포함하며 메뉴별 전체 흐름의 검증 여부는 [기능 이관표](feature-map.md#현재-구현과-검증)에 구분한다.
+Enter는 보조 명령으로 현재 프로세스를 다시 검증한 뒤 같은 세션에서는 pane 초점을 변경하고 다른 세션에서는 `switch_session_with_focus`를 호출한다. 입력·종료·실행과 보조 메뉴의 외부 조작도 호스트를 경유한다. 요청 ID와 내용을 실행 전에 저장하고 결과를 실행 후 기록한다. 중복 요청은 기존 결과를 반환하며, pending이나 결과가 불명확한 조작을 자동 재전송하지 않는다. 실제 검증은 호스트 fixture 조작을 포함하며 메뉴별 전체 흐름의 검증 여부는 [기능 이관표](feature-map.md#현재-구현과-검증)에 구분한다.
 
 Zellij 0.45.0은 연결된 클라이언트가 없을 때 plugin reload를 거부한다. 수집기 자체의 detach 이후 실행과는 다른 조건이다. 재로딩은 클라이언트를 연결한 상태에서 수행한다. 검증 범위는 [실행 검증 기록](runtime-validation.md)을 따른다.
+
+## 다음 에이전트 탐색
+
+같은 WASM의 collector가 전역 키의 `agent-next` 메시지를 처리한다. 화면 인스턴스는 처리하지 않는다. 필터와 순환 선택은 순수 코어의 `NextFilter`와 `View::next_agent`에 두며, 호스트 `next`는 `{filter, session, pane_id}` JSON을 받아 최신 수집 상태에서 후보를 찾고 정확한 실행 identity와 pane을 재검증한다. 결과는 검증한 Agent 또는 JSON `null`이다. 조회 중 사라지거나 교체된 후보는 제외한다. 고정 여부는 화면의 부모 상속과 같으며 idle은 정확히 `Status::Idle`, working은 정확히 `Status::Working`이다.
+
+Zellij 0.45.0은 전역 키 메시지를 여러 클라이언트 인스턴스로 전달하고 키 입력자의 ID를 제공하지 않는다. `ListClients`로 연결된 최소 ID 클라이언트 하나만 처리하도록 선출하고 나머지 및 detach된 인스턴스는 큐를 버린다. 처리 클라이언트의 실제 초점 pane은 클라이언트 목록에서, 세션 이름은 현재 세션 목록에서 조회한다. 같은 세션은 pane 초점을 변경하고 다른 세션은 기존 세션 이동 API를 사용한다. 연속 요청은 앞선 결과를 기준으로 순서대로 탐색한다. 대시보드 `Tab`은 검색 결과의 양쪽 패널에서 working 실행만 선택하며 pane 이동은 `Enter`로 요청한다. 탐색 큐와 초점 관측은 플러그인 수명에 속하고 저장하지 않으므로 Store/스냅샷 3·DB 구조 2·이벤트 1을 유지한다. reload 뒤에는 실제 초점과 저장된 상태를 다시 읽는다.

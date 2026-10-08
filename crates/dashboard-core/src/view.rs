@@ -343,9 +343,9 @@ impl View {
         let footer = vec![
             Line::color(rule, color, false),
             Line::plain(if width >= 75 {
-                "h/l 영역 p 지시 n 새 실행 i 입력 I 에디터 g worktree m 병합 a 태그 Space pin d 종료 Enter 이동 R 갱신 q 닫기"
+                "Tab working h/l 영역 p 지시 n 새 실행 i 입력 I 에디터 g worktree m 병합 a 태그 Space pin d 종료 Enter 이동 R 갱신 q 닫기"
             } else {
-                "h/l 영역 Tab 전환 Space pin Enter focus / 검색 q quit"
+                "Tab working h/l 영역 Space pin Enter focus / 검색 q quit"
             }),
         ];
         if height < 3 {
@@ -699,7 +699,7 @@ fn visit<'a>(
     }
 }
 
-fn hierarchy_root<'a>(snapshot: &'a Snapshot, mut agent: &'a Agent) -> &'a Agent {
+pub(crate) fn hierarchy_root<'a>(snapshot: &'a Snapshot, mut agent: &'a Agent) -> &'a Agent {
     let mut seen = BTreeSet::new();
     while let Some(parent) = agent.parent_id.as_ref() {
         if !seen.insert(agent.identity.agent_id.as_str()) {
@@ -843,6 +843,89 @@ mod tests {
             agent.pane.observed_at_ms = 1000;
         }
         store.snapshot(1000)
+    }
+
+    #[test]
+    fn working_cycle_crosses_panels_wraps_and_preserves_empty_selection() {
+        let mut snapshot = populated();
+        for a in &mut snapshot.agents {
+            a.status = Status::Idle;
+        }
+        snapshot.agents[0].pinned = true;
+        snapshot.agents[0].status = Status::Working;
+        snapshot.agents[2].status = Status::Working;
+        snapshot.agents[3].status = Status::Working;
+        snapshot.agents[3].liveness = Liveness::Unverified;
+        let pinned = snapshot.agents[0].identity.agent_id.clone();
+        let unpinned = snapshot.agents[2].identity.agent_id.clone();
+        let mut view = View::default();
+        view.select_next_working(&snapshot);
+        assert_eq!(view.selected_id.as_ref(), Some(&pinned));
+        assert!(view.pinned_only);
+        view.select_next_working(&snapshot);
+        assert_eq!(view.selected_id.as_ref(), Some(&unpinned));
+        assert!(!view.pinned_only);
+        view.select_next_working(&snapshot);
+        assert_eq!(view.selected_id.as_ref(), Some(&pinned));
+        view.query = "no match".into();
+        view.select_next_working(&snapshot);
+        assert_eq!(view.selected_id.as_ref(), Some(&pinned));
+        view.query.clear();
+        snapshot.agents[0].status = Status::Idle;
+        snapshot.agents[2].status = Status::Idle;
+        view.select_next_working(&snapshot);
+        assert_eq!(view.selected_id.as_ref(), Some(&pinned));
+    }
+
+    #[test]
+    fn next_filters_use_live_panes_exact_idle_and_inherited_pin() {
+        let mut snapshot = populated();
+        snapshot.agents.truncate(5);
+        for a in &mut snapshot.agents {
+            a.status = Status::Idle;
+        }
+        let parent = snapshot.agents[0].identity.agent_id.clone();
+        let child = snapshot.agents[1].identity.agent_id.clone();
+        snapshot.agents[0].pinned = true;
+        snapshot.agents[1].parent_id = Some(parent.clone());
+        snapshot.agents[2].status = Status::Done;
+        snapshot.agents[3].pane.presence = crate::PanePresence::Missing;
+        snapshot.agents[4].liveness = Liveness::Gone;
+        let view = View::default();
+        use crate::NextFilter as F;
+        assert_eq!(
+            view.next_agent(&snapshot, F::IdleAndPinned, Some(&parent))
+                .unwrap()
+                .identity
+                .agent_id,
+            child
+        );
+        assert_eq!(
+            view.next_agent(&snapshot, F::PinnedOnly, Some(&child))
+                .unwrap()
+                .identity
+                .agent_id,
+            parent
+        );
+        assert!(view
+            .next_agent(&snapshot, F::IdleAndUnpinned, None)
+            .is_none());
+        assert_eq!(
+            view.next_agent(&snapshot, F::UnpinnedOnly, None)
+                .unwrap()
+                .status,
+            Status::Done
+        );
+        snapshot.agents[0].ended = true;
+        assert_eq!(
+            view.next_agent(&snapshot, F::IdleAndUnpinned, Some("deleted-cursor"))
+                .unwrap()
+                .identity
+                .agent_id,
+            child
+        );
+        assert!(F::parse("unexpected").is_err());
+        assert_eq!(F::parse("working-only").unwrap(), F::WorkingOnly);
     }
 
     #[test]

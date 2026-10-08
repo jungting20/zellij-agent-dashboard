@@ -116,6 +116,42 @@ pub fn resolve(id: &str, deps: &HostDependencies) -> Result<Agent, String> {
     checked(&agent.identity, deps)
 }
 
+pub fn next_agent(
+    request: &dashboard_core::NextRequest,
+    deps: &HostDependencies,
+) -> Result<Option<Agent>, String> {
+    let snapshot = crate::collector::scan(deps)?;
+    let current = snapshot.agents.iter().find(|a| {
+        a.identity.session_name == request.session
+            && Some(a.identity.pane_id) == request.pane_id
+            && a.visible()
+            && a.liveness == dashboard_core::Liveness::Live
+    });
+    let view = dashboard_core::view::View::default();
+    let mut remaining = snapshot.clone();
+    // A candidate may exit between collection and verification. Skip that
+    // exact execution; never resolve its ID into a replacement execution.
+    while let Some(candidate) = view.next_agent(
+        &remaining,
+        request.filter,
+        current.map(|a| a.identity.agent_id.as_str()),
+    ) {
+        let target = candidate.identity.clone();
+        if let Ok(agent) = checked(&target, deps) {
+            let fresh = deps.repository.snapshot(now_ms())?;
+            let pinned = dashboard_core::view::View::default()
+                .panel_rows(&fresh, true)
+                .iter()
+                .any(|a| a.identity == agent.identity);
+            if request.filter.matches(&agent, pinned) {
+                return Ok(Some(agent));
+            }
+        }
+        remaining.agents.retain(|a| a.identity != target);
+    }
+    Ok(None)
+}
+
 fn cwd(value: &str) -> Result<PathBuf, String> {
     if !Path::new(value).is_absolute() {
         return Err("작업 경로는 절대 경로여야 합니다".into());
@@ -632,6 +668,47 @@ mod tests {
         fn notify_changed(&self, _: &SessionId, _: &str) -> Result<(), String> {
             panic!("unexpected notify")
         }
+    }
+
+    #[test]
+    fn next_verifies_exact_execution_and_returns_none_for_recycled_or_missing_pane() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeHost::default();
+        let target = fake.seed(dir.path());
+        let repository = crate::repository::at(dir.path());
+        {
+            let mut locked = repository.begin_runtime().unwrap();
+            locked.store.observe_pane(
+                &target,
+                dashboard_core::PaneInfo {
+                    presence: dashboard_core::PanePresence::Present,
+                    observed_at_ms: now_ms(),
+                    ..Default::default()
+                },
+            );
+            locked.commit().unwrap();
+        }
+        let deps = HostDependencies {
+            repository: repository.as_ref(),
+            runner: &fake,
+            terminal: &fake,
+        };
+        // Freshly discovered agents stay within the screen startup grace.
+        let request = dashboard_core::NextRequest {
+            filter: dashboard_core::NextFilter::All,
+            session: "dev".into(),
+            pane_id: Some(7),
+        };
+        assert_eq!(
+            next_agent(&request, &deps).unwrap().unwrap().identity,
+            target
+        );
+        fake.missing_pane.set(true);
+        assert!(next_agent(&request, &deps).unwrap().is_none());
+        fake.missing_pane.set(false);
+        fake.changed.set(true);
+        assert!(next_agent(&request, &deps).unwrap().is_none());
+        assert!(fake.calls.borrow().is_empty());
     }
 
     #[test]
