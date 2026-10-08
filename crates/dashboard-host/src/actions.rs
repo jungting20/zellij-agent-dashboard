@@ -7,7 +7,7 @@ use crate::{
 };
 use dashboard_core::{
     Action, ActionRequest, ActionResult, Agent, Catalog, Identity, LaunchInfo, Liveness,
-    RequestState, StateSignal, Status,
+    RequestState, StateSignal,
 };
 use std::{
     env, fs,
@@ -76,41 +76,20 @@ pub fn catalog(deps: &HostDependencies) -> Result<Catalog, String> {
 }
 
 pub fn link_launches(store: &mut dashboard_core::Store, inventory: &process::Inventory) {
-    for agent in store
+    let observations: Vec<_> = store
         .agents
-        .values_mut()
-        .filter(|a| a.liveness == Liveness::Live)
-    {
-        let Some(process) = inventory
-            .processes
-            .iter()
-            .find(|p| p.pid == agent.identity.pid)
-        else {
-            continue;
-        };
-        let Some(id) = process::env_value(&process.command, "ZAD_LAUNCH_ID") else {
-            continue;
-        };
-        let Some(launch) = store.launches.get_mut(&id) else {
-            continue;
-        };
-        if launch.session != agent.identity.session_name
-            || launch.epoch != agent.identity.session_epoch
-            || launch.tool != agent.tool
-            || launch
-                .pane_id
-                .is_some_and(|pane| pane != agent.identity.pane_id)
-            || launch
-                .agent_id
-                .as_ref()
-                .is_some_and(|old| old != &agent.identity.agent_id)
-        {
-            continue;
-        }
-        launch.pane_id = Some(agent.identity.pane_id);
-        launch.agent_id = Some(agent.identity.agent_id.clone());
-        agent.parent_id.clone_from(&launch.parent_id);
-        agent.cwd.clone_from(&launch.cwd);
+        .values()
+        .filter_map(|agent| {
+            let process = inventory
+                .processes
+                .iter()
+                .find(|p| p.pid == agent.identity.pid)?;
+            let id = process::env_value(&process.command, "ZAD_LAUNCH_ID")?;
+            Some((agent.identity.clone(), id))
+        })
+        .collect();
+    for (identity, id) in observations {
+        store.associate_launch(&identity, &id);
     }
 }
 
@@ -201,8 +180,8 @@ fn launch(
     let directory = path.to_string_lossy().to_string();
     {
         let mut locked = deps.repository.begin()?;
-        locked.store.launches.insert(
-            request.request_id.clone(),
+        locked.store.record_launch(
+            &request.request_id,
             LaunchInfo {
                 parent_id: parent.map(|p| p.agent_id.clone()),
                 session: session.into(),
@@ -212,7 +191,7 @@ fn launch(
                 pane_id: None,
                 agent_id: None,
             },
-        );
+        )?;
         locked.commit()?;
     }
     let marker = format!("ZAD_LAUNCH_ID={}", request.request_id);
@@ -232,12 +211,7 @@ fn launch(
         },
     )?)?;
     let mut locked = deps.repository.begin()?;
-    locked
-        .store
-        .launches
-        .get_mut(&request.request_id)
-        .unwrap()
-        .pane_id = Some(pane);
+    locked.store.record_launch_pane(&request.request_id, pane)?;
     locked.store.remember_directory(&directory);
     locked.commit()?;
     Ok((format!("{tool} 실행 완료"), Some(pane), directory))
@@ -282,14 +256,9 @@ fn execute(
             Ok(("입력 전송 완료".into(), None, String::new()))
         }
         Action::Alias { target, alias } => {
-            if alias.len() > 120 || alias.chars().any(char::is_control) {
-                return Err("한 줄 태그를 입력해주세요 (120 bytes 이하)".into());
-            }
             checked(target, deps)?;
             let mut locked = deps.repository.begin()?;
-            locked.store.validate_target(target)?;
-            locked.store.agents.get_mut(&target.agent_id).unwrap().alias = alias.trim().into();
-            locked.store.revision += 1;
+            locked.store.set_alias(target, alias)?;
             locked.commit()?;
             Ok(("태그 저장 완료".into(), None, String::new()))
         }
@@ -297,29 +266,12 @@ fn execute(
             checked(target, deps)?;
             // Serialize pin settings through the final protection check/close.
             let mut locked = deps.repository.begin()?;
-            locked.store.validate_target(target)?;
-            let mut id = Some(target.agent_id.as_str());
-            let mut seen = std::collections::BTreeSet::new();
-            while let Some(current) = id {
-                if !seen.insert(current) {
-                    break;
-                }
-                let Some(agent) = locked.store.agents.get(current) else {
-                    break;
-                };
-                if agent.pinned {
-                    return Err("고정된 에이전트는 종료할 수 없습니다".into());
-                }
-                id = agent.parent_id.as_deref();
-            }
+            locked.store.validate_close(target)?;
             deps.terminal.close_pane(
                 &SessionId(target.session_name.clone()),
                 &pane_id(target.pane_id),
             )?;
-            let agent = locked.store.agents.get_mut(&target.agent_id).unwrap();
-            agent.ended = true;
-            agent.liveness = Liveness::Gone;
-            locked.store.revision += 1;
+            locked.store.close_confirmed(target)?;
             locked.commit()?;
             Ok(("pane 종료 완료".into(), None, String::new()))
         }
@@ -375,10 +327,7 @@ fn execute(
             let mut locked = deps.repository.begin()?;
             locked
                 .store
-                .requests
-                .get_mut(&request.request_id)
-                .unwrap()
-                .path = path.to_string_lossy().into();
+                .record_request_path(&request.request_id, path.to_string_lossy().into())?;
             locked.commit()?;
             drop(locked);
             git(
@@ -502,18 +451,9 @@ fn execute(
             Ok((results.join("\n\n"), None, String::new()))
         }
         Action::Merge { parent, child } => {
-            let pa = checked(parent, deps)?;
+            checked(parent, deps)?;
             let ch = checked(child, deps)?;
-            if ch.parent_id.as_ref() != Some(&parent.agent_id) {
-                return Err("선택한 에이전트는 직접 자식이 아닙니다".into());
-            }
-            if !matches!(pa.status, Status::Idle | Status::Done)
-                || !matches!(ch.status, Status::Idle | Status::Done)
-            {
-                return Err(
-                    "부모와 자식이 idle 또는 done일 때 병합 지시를 보낼 수 있습니다".into(),
-                );
-            }
+            deps.repository.read()?.validate_merge(parent, child)?;
             let branch = git(Path::new(&ch.cwd), &["branch", "--show-current"], deps)?;
             let instruction=format!("자식 worktree {}의 작업을 검토하고 현재 브랜치에 병합해주세요.\n자식 경로: {}\n자식 브랜치: {}\n충돌과 테스트 결과를 확인하고 처리 결과를 보고해주세요.",ch.project(),ch.cwd,branch);
             send(parent, &instruction, deps)?;
@@ -540,29 +480,25 @@ pub fn action(
     }
     let result = execute(dir, &request, deps);
     let mut locked = deps.repository.begin()?;
-    let record = locked
-        .store
-        .requests
-        .get_mut(&request.request_id)
-        .ok_or("request record disappeared")?;
-    match result {
-        Ok((message, pane, path)) => {
-            record.state = RequestState::Succeeded;
-            record.message = message;
-            record.pane_id = pane;
-            record.path = path;
-        }
+    let response = match result {
+        Ok((message, pane, path)) => locked.store.finish_request(
+            &request.request_id,
+            RequestState::Succeeded,
+            message,
+            pane,
+            Some(path),
+        )?,
         Err(error) => {
-            record.state = if matches!(request.action, Action::Alias { .. }) {
+            let state = if matches!(request.action, Action::Alias { .. }) {
                 RequestState::Failed
             } else {
                 RequestState::Uncertain
             };
-            record.message = error;
+            locked
+                .store
+                .finish_request(&request.request_id, state, error, None, None)?
         }
-    }
-    let response = record.clone();
-    locked.store.revision += 1;
+    };
     locked.commit()?;
     Ok(response)
 }

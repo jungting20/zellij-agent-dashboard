@@ -206,7 +206,7 @@ pub struct Activity {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Store {
+pub struct StoreData {
     #[serde(default)]
     pub scan_lease: Option<ScanLease>,
     pub schema_version: u32,
@@ -222,13 +222,39 @@ pub struct Store {
     pub recent_directories: Vec<String>,
 }
 
+/// Serialized persistence data is restored explicitly; live state is read-only
+/// outside core transitions. Deref deliberately has no DerefMut implementation.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Store {
+    #[serde(flatten)]
+    pub(crate) data: StoreData,
+}
+
+impl std::ops::Deref for Store {
+    type Target = StoreData;
+    fn deref(&self) -> &StoreData {
+        &self.data
+    }
+}
+
+impl Store {
+    pub fn restore(data: StoreData) -> Result<Self, String> {
+        let mut store = Self { data };
+        store.migrate()?;
+        Ok(store)
+    }
+    pub fn into_data(self) -> StoreData {
+        self.data
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScanLease {
     pub token: String,
     pub expires_at_ms: u64,
 }
 
-impl Default for Store {
+impl Default for StoreData {
     fn default() -> Self {
         Self {
             scan_lease: None,
@@ -271,29 +297,32 @@ impl Store {
     /// v1 had only hook reports (and dashboard-generated events).
     /// Preserve those as hook-owned rather than overwrite historical state.
     pub fn migrate(&mut self) -> Result<(), String> {
-        if self.schema_version == 1 {
-            for agent in self.agents.values_mut() {
+        if self.data.schema_version == 1 {
+            for agent in self.data.agents.values_mut() {
                 agent.discovered_at_ms = agent.status_since_ms;
                 if agent.sequence > 0 {
                     agent.status_source = StatusSource::Hook;
                     agent.last_hook_report_ms = agent.last_report_ms;
                 }
             }
-            self.schema_version = 2;
+            self.data.schema_version = 2;
         }
-        if self.schema_version == 2 {
-            for agent in self.agents.values_mut() {
+        if self.data.schema_version == 2 {
+            for agent in self.data.agents.values_mut() {
                 agent.pane.presence = PanePresence::Unknown;
                 agent.pane.observed_at_ms = 0;
             }
-            self.schema_version = SCHEMA_VERSION;
+            self.data.schema_version = SCHEMA_VERSION;
         }
         self.check_version()
     }
 
     pub fn check_version(&self) -> Result<(), String> {
-        if self.schema_version != SCHEMA_VERSION {
-            return Err(format!("unsupported store version {}", self.schema_version));
+        if self.data.schema_version != SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported store version {}",
+                self.data.schema_version
+            ));
         }
         Ok(())
     }
@@ -314,10 +343,10 @@ impl Store {
                 text,
             } => {
                 self.validate_target(identity)?;
-                let agent = self.agents.get_mut(&identity.agent_id).unwrap();
+                let agent = self.data.agents.get_mut(&identity.agent_id).unwrap();
                 agent.summary.clone_from(text);
                 agent.last_instruction_ms = Some(*observed_at_ms);
-                self.revision += 1;
+                self.data.revision += 1;
                 Ok(ApplyResult::Applied)
             }
         }
@@ -327,7 +356,7 @@ impl Store {
         if event.schema_version != EVENT_SCHEMA_VERSION || event.event_id.is_empty() {
             return Err("invalid event version or ID".into());
         }
-        let Some(agent) = self.agents.get_mut(&event.identity.agent_id) else {
+        let Some(agent) = self.data.agents.get_mut(&event.identity.agent_id) else {
             return Ok(ApplyResult::Ignored);
         };
         if agent.identity != event.identity
@@ -380,18 +409,20 @@ impl Store {
             let previous = agent.status;
             agent.status = next;
             agent.status_since_ms = event.observed_at_ms;
-            self.activities.push(Activity {
+            self.data.activities.push(Activity {
                 agent_id: agent.identity.agent_id.clone(),
                 at_ms: event.observed_at_ms,
                 status: next,
                 project: agent.project().into(),
                 previous: Some(previous),
             });
-            if self.activities.len() > 50 {
-                self.activities.drain(..self.activities.len() - 50);
+            if self.data.activities.len() > 50 {
+                self.data
+                    .activities
+                    .drain(..self.data.activities.len() - 50);
             }
         }
-        self.revision += 1;
+        self.data.revision += 1;
         Ok(ApplyResult::Applied)
     }
 
@@ -399,7 +430,7 @@ impl Store {
         if observation.observation_id.is_empty() {
             return Err("empty observation ID".into());
         }
-        let Some(agent) = self.agents.get_mut(&observation.identity.agent_id) else {
+        let Some(agent) = self.data.agents.get_mut(&observation.identity.agent_id) else {
             return Ok(ApplyResult::Ignored);
         };
         if agent.identity != observation.identity
@@ -444,31 +475,33 @@ impl Store {
                     let previous = agent.status;
                     agent.status = next;
                     agent.status_since_ms = observation.observed_at_ms;
-                    self.activities.push(Activity {
+                    self.data.activities.push(Activity {
                         agent_id: agent.identity.agent_id.clone(),
                         at_ms: observation.observed_at_ms,
                         status: next,
                         project: agent.project().into(),
                         previous: Some(previous),
                     });
-                    if self.activities.len() > 50 {
-                        self.activities.drain(..self.activities.len() - 50);
+                    if self.data.activities.len() > 50 {
+                        self.data
+                            .activities
+                            .drain(..self.data.activities.len() - 50);
                     }
                 }
             }
         } else {
             agent.idle_confirmations = 0;
         }
-        self.revision += 1;
+        self.data.revision += 1;
         Ok(ApplyResult::Applied)
     }
 
     /// A successful whole process inventory is required before calling this.
     pub fn reconcile(&mut self, found: &[FoundProcess], now_ms: u64) {
-        if now_ms < self.last_scan_ms {
+        if now_ms < self.data.last_scan_ms {
             return;
         }
-        for agent in self.agents.values_mut() {
+        for agent in self.data.agents.values_mut() {
             agent.liveness = if !agent.ended && found.iter().any(|p| p.identity == agent.identity) {
                 Liveness::Live
             } else {
@@ -476,7 +509,8 @@ impl Store {
             };
         }
         for process in found {
-            self.agents
+            self.data
+                .agents
                 .entry(process.identity.agent_id.clone())
                 .or_insert_with(|| Agent {
                     status_source: StatusSource::Unknown,
@@ -507,18 +541,18 @@ impl Store {
                 });
         }
         // Retain a short history without letting ended processes accumulate forever.
-        self.agents.retain(|_, a| {
+        self.data.agents.retain(|_, a| {
             a.liveness == Liveness::Live
                 || now_ms.saturating_sub(a.last_report_ms.unwrap_or(a.status_since_ms)) < 86_400_000
         });
-        self.last_scan_ms = now_ms;
-        self.revision += 1;
+        self.data.last_scan_ms = now_ms;
+        self.data.revision += 1;
     }
 
     /// Pane observations describe reachability, never the agent's work status.
     /// Reject results for another process generation or an older pane query.
     pub fn observe_pane(&mut self, identity: &Identity, pane: PaneInfo) -> bool {
-        let Some(agent) = self.agents.get_mut(&identity.agent_id) else {
+        let Some(agent) = self.data.agents.get_mut(&identity.agent_id) else {
             return false;
         };
         if agent.identity != *identity
@@ -530,13 +564,14 @@ impl Store {
             return false;
         }
         agent.pane = pane;
-        self.revision += 1;
+        self.data.revision += 1;
         true
     }
 
     pub fn snapshot(&self, now_ms: u64) -> Snapshot {
-        let verified = now_ms.saturating_sub(self.last_scan_ms) < 10_000;
+        let verified = now_ms.saturating_sub(self.data.last_scan_ms) < 10_000;
         let agents = self
+            .data
             .agents
             .values()
             .cloned()
@@ -549,23 +584,27 @@ impl Store {
             .collect();
         Snapshot {
             schema_version: SCHEMA_VERSION,
-            revision: self.revision,
+            revision: self.data.revision,
             now_ms,
-            last_scan_ms: self.last_scan_ms,
+            last_scan_ms: self.data.last_scan_ms,
             agents,
-            activities: self.activities.clone(),
+            activities: self.data.activities.clone(),
         }
     }
 
     /// Setting an explicit value is idempotent when replicas repeat a request.
     pub fn set_pinned(&mut self, id: &str, pinned: bool) -> Result<(), String> {
-        let agent = self.agents.get_mut(id).ok_or("agent no longer exists")?;
+        let agent = self
+            .data
+            .agents
+            .get_mut(id)
+            .ok_or("agent no longer exists")?;
         if agent.liveness != Liveness::Live || agent.ended {
             return Err("agent process changed or exited; refresh the list".into());
         }
         if agent.pinned != pinned {
             agent.pinned = pinned;
-            self.revision += 1;
+            self.data.revision += 1;
         }
         Ok(())
     }
@@ -596,15 +635,15 @@ mod tests {
         let mut store = Store::default();
         store.reconcile(&[found("run")], 1000);
         store.set_pinned("run", true).unwrap();
-        let revision = store.revision;
+        let revision = store.data.revision;
         store.set_pinned("run", true).unwrap();
-        assert_eq!(store.revision, revision);
+        assert_eq!(store.data.revision, revision);
         let recovered: Store =
             serde_json::from_str(&serde_json::to_string(&store).unwrap()).unwrap();
         assert!(recovered.agents["run"].pinned);
         store.reconcile(&[found("replacement")], 1100);
         assert!(store.set_pinned("run", false).is_err());
-        assert!(!store.agents["replacement"].pinned);
+        assert!(!store.data.agents["replacement"].pinned);
     }
 
     fn event(run: &str, sequence: u64, kind: EventKind) -> AgentEvent {
@@ -629,7 +668,7 @@ mod tests {
         store
             .apply(&event("run", 2, EventKind::TurnFinished))
             .unwrap();
-        let revision = store.revision;
+        let revision = store.data.revision;
         assert_eq!(
             store.apply(&event("run", 1, EventKind::TurnStarted)),
             Ok(ApplyResult::Ignored)
@@ -638,23 +677,23 @@ mod tests {
             store.apply(&event("run", 2, EventKind::TurnFinished)),
             Ok(ApplyResult::Ignored)
         );
-        assert_eq!(store.revision, revision);
-        assert_eq!(store.agents["run"].status, Status::Done);
+        assert_eq!(store.data.revision, revision);
+        assert_eq!(store.data.agents["run"].status, Status::Done);
     }
 
     #[test]
     fn reused_pane_rejects_events_and_settings_from_previous_process() {
         let mut store = Store::default();
         store.reconcile(&[found("old")], 1000);
-        store.agents.get_mut("old").unwrap().pinned = true;
+        store.data.agents.get_mut("old").unwrap().pinned = true;
         store.reconcile(&[found("new")], 1100);
         assert_eq!(
             store.apply(&event("old", 1, EventKind::TurnStarted)),
             Ok(ApplyResult::Ignored)
         );
-        assert_eq!(store.agents["old"].liveness, Liveness::Gone);
-        assert_eq!(store.agents["new"].status, Status::Found);
-        assert!(!store.agents["new"].pinned);
+        assert_eq!(store.data.agents["old"].liveness, Liveness::Gone);
+        assert_eq!(store.data.agents["new"].status, Status::Found);
+        assert!(!store.data.agents["new"].pinned);
     }
 
     #[test]
@@ -695,7 +734,7 @@ mod tests {
         store
             .apply(&event("run", 2, EventKind::ToolFinished))
             .unwrap();
-        assert_eq!(store.agents["run"].status, Status::Done);
+        assert_eq!(store.data.agents["run"].status, Status::Done);
     }
 
     #[test]
@@ -706,7 +745,7 @@ mod tests {
             .apply(&event("run", 1, EventKind::SessionEnded))
             .unwrap();
         store.reconcile(&[found("run")], 1100);
-        assert_eq!(store.agents["run"].liveness, Liveness::Gone);
+        assert_eq!(store.data.agents["run"].liveness, Liveness::Gone);
         assert_eq!(
             store.apply(&event("run", 2, EventKind::ToolStarted)),
             Ok(ApplyResult::Ignored)
@@ -742,7 +781,7 @@ mod tests {
         store
             .apply(&event("run", 1, EventKind::TurnFinished))
             .unwrap();
-        assert_eq!(store.agents["run"].status_source, StatusSource::Hook);
+        assert_eq!(store.data.agents["run"].status_source, StatusSource::Hook);
         let mut recovered: Store =
             serde_json::from_str(&serde_json::to_string(&store).unwrap()).unwrap();
         recovered.reconcile(&[found("run")], 100_000);
@@ -781,7 +820,7 @@ mod tests {
                 .unwrap(),
             ApplyResult::Ignored
         );
-        assert_eq!(store.agents["replacement"].status, Status::Found);
+        assert_eq!(store.data.agents["replacement"].status, Status::Found);
     }
 
     #[test]
@@ -794,28 +833,28 @@ mod tests {
         let idle = screen("run", 7000, Some(Status::Idle), false);
         store.apply_signal(&idle).unwrap();
         store.apply_signal(&idle).unwrap();
-        assert_eq!(store.agents["run"].idle_confirmations, 1);
+        assert_eq!(store.data.agents["run"].idle_confirmations, 1);
         store
             .apply_signal(&screen("run", 9000, None, false))
             .unwrap();
-        assert_eq!(store.agents["run"].idle_confirmations, 0);
+        assert_eq!(store.data.agents["run"].idle_confirmations, 0);
         for at in [11_000, 13_000] {
             store
                 .apply_signal(&screen("run", at, Some(Status::Idle), false))
                 .unwrap();
-            assert_eq!(store.agents["run"].status, Status::Working);
+            assert_eq!(store.data.agents["run"].status, Status::Working);
         }
         store
             .apply_signal(&screen("run", 15_000, Some(Status::Idle), false))
             .unwrap();
-        assert_eq!(store.agents["run"].status, Status::Idle);
+        assert_eq!(store.data.agents["run"].status, Status::Idle);
         store
             .apply_signal(&screen("run", 17_000, Some(Status::Working), false))
             .unwrap();
         store
             .apply_signal(&screen("run", 19_000, Some(Status::Idle), true))
             .unwrap();
-        assert_eq!(store.agents["run"].status, Status::Idle);
+        assert_eq!(store.data.agents["run"].status, Status::Idle);
     }
 
     #[test]
@@ -832,7 +871,7 @@ mod tests {
                 text: "새 지시".into(),
             })
             .unwrap();
-        let agent = &store.agents["run"];
+        let agent = &store.data.agents["run"];
         assert_eq!(agent.status_source, StatusSource::Screen);
         assert_eq!(agent.status, Status::Idle);
         assert_eq!(agent.summary, "새 지시");
@@ -844,11 +883,11 @@ mod tests {
         let mut store = Store::default();
         store.reconcile(&[found("old")], 1000);
         store.reconcile(&[found("new")], 2000);
-        let revision = store.revision;
+        let revision = store.data.revision;
         store.reconcile(&[found("old")], 1500);
-        assert_eq!(store.agents["old"].liveness, Liveness::Gone);
-        assert_eq!(store.agents["new"].liveness, Liveness::Live);
-        assert_eq!(store.revision, revision);
+        assert_eq!(store.data.agents["old"].liveness, Liveness::Gone);
+        assert_eq!(store.data.agents["new"].liveness, Liveness::Live);
+        assert_eq!(store.data.revision, revision);
     }
 
     #[test]
@@ -894,7 +933,7 @@ mod tests {
         let mut store = Store::default();
         let original = found("run");
         store.reconcile(&[original.clone()], 1000);
-        store.agents.get_mut("run").unwrap().status = Status::Working;
+        store.data.agents.get_mut("run").unwrap().status = Status::Working;
         let present = PaneInfo {
             presence: PanePresence::Present,
             observed_at_ms: 2000,
@@ -910,13 +949,16 @@ mod tests {
             }
         ));
         assert!(!store.observe_pane(&original.identity, present.clone()));
-        assert_eq!(store.agents["run"].status, Status::Working);
-        assert_eq!(store.agents["run"].liveness, Liveness::Live);
-        assert_eq!(store.agents["run"].pane.presence, PanePresence::Missing);
+        assert_eq!(store.data.agents["run"].status, Status::Working);
+        assert_eq!(store.data.agents["run"].liveness, Liveness::Live);
+        assert_eq!(
+            store.data.agents["run"].pane.presence,
+            PanePresence::Missing
+        );
         store.reconcile(&[found("replacement")], 4000);
         assert!(!store.observe_pane(&original.identity, present));
         assert_eq!(
-            store.agents["replacement"].pane.presence,
+            store.data.agents["replacement"].pane.presence,
             PanePresence::Unknown
         );
         let mut wrong = found("replacement").identity;
@@ -935,17 +977,20 @@ mod tests {
     fn version_two_migration_requires_fresh_pane_evidence() {
         let mut store = Store::default();
         store.reconcile(&[found("run")], 1000);
-        store.schema_version = 2;
-        store.agents.get_mut("run").unwrap().pane.title = "old pane".into();
+        store.data.schema_version = 2;
+        store.data.agents.get_mut("run").unwrap().pane.title = "old pane".into();
         let mut value = serde_json::to_value(&store).unwrap();
         let pane = value["agents"]["run"]["pane"].as_object_mut().unwrap();
         pane.remove("presence");
         pane.remove("observed_at_ms");
         let mut restored: Store = serde_json::from_value(value).unwrap();
         restored.migrate().unwrap();
-        assert_eq!(restored.schema_version, 3);
-        assert_eq!(restored.agents["run"].pane.presence, PanePresence::Unknown);
-        assert!(!restored.agents["run"].visible());
-        assert_eq!(restored.agents["run"].pane.title, "old pane");
+        assert_eq!(restored.data.schema_version, 3);
+        assert_eq!(
+            restored.data.agents["run"].pane.presence,
+            PanePresence::Unknown
+        );
+        assert!(!restored.data.agents["run"].visible());
+        assert_eq!(restored.data.agents["run"].pane.title, "old pane");
     }
 }

@@ -52,6 +52,13 @@ pub fn now_ms() -> u64 {
 }
 
 #[cfg(test)]
+pub fn edit_fixture(store: &mut Store, edit: impl FnOnce(&mut dashboard_core::StoreData)) {
+    let mut data = store.clone().into_data();
+    edit(&mut data);
+    *store = serde_json::from_value(serde_json::to_value(data).unwrap()).unwrap();
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::{cell::RefCell, rc::Rc};

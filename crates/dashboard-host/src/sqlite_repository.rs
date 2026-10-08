@@ -184,7 +184,7 @@ fn load(conn: &Connection) -> Result<Store, String> {
             r.get(0)
         })
         .map_err(error)?;
-    let mut store: Store = serde_json::from_str(&body).map_err(error)?;
+    let mut store: dashboard_core::StoreData = serde_json::from_str(&body).map_err(error)?;
     store.agents = records(conn, "agents")?.into_iter().collect();
     store.activities = records(conn, "activities")?
         .into_iter()
@@ -196,12 +196,11 @@ fn load(conn: &Connection) -> Result<Store, String> {
         .into_iter()
         .map(|(_, v)| v)
         .collect();
-    store.migrate()?;
-    Ok(store)
+    Store::restore(store)
 }
 
 fn metadata(store: &Store) -> Result<String, String> {
-    let mut value = store.clone();
+    let mut value = store.clone().into_data();
     value.agents.clear();
     value.activities.clear();
     value.requests.clear();
@@ -311,7 +310,8 @@ mod tests {
         store.reconcile(&inventory.found, 10_000);
         let id = store.agents.keys().next().unwrap().clone();
         store.set_pinned(&id, true).unwrap();
-        store.agents.get_mut(&id).unwrap().alias = "한글 태그".into();
+        let target = store.agents[&id].identity.clone();
+        store.set_alias(&target, "한글 태그").unwrap();
         store.remember_directory("/tmp/한글");
         store
             .claim(
@@ -327,21 +327,25 @@ mod tests {
                 10_001,
             )
             .unwrap();
-        store.launches.insert(
-            "pending".into(),
-            LaunchInfo {
-                parent_id: Some(id),
-                session: "dev".into(),
-                epoch: "epoch".into(),
-                cwd: "/tmp".into(),
-                tool: "codex".into(),
-                pane_id: Some(8),
-                agent_id: None,
-            },
-        );
-        store.scan_lease = Some(ScanLease {
-            token: "expired".into(),
-            expires_at_ms: 1,
+        store
+            .record_launch(
+                "pending",
+                LaunchInfo {
+                    parent_id: Some(id),
+                    session: "dev".into(),
+                    epoch: "epoch".into(),
+                    cwd: "/tmp".into(),
+                    tool: "codex".into(),
+                    pane_id: Some(8),
+                    agent_id: None,
+                },
+            )
+            .unwrap();
+        crate::repository::edit_fixture(&mut store, |data| {
+            data.scan_lease = Some(ScanLease {
+                token: "expired".into(),
+                expires_at_ms: 1,
+            })
         });
         store
     }
@@ -361,7 +365,7 @@ mod tests {
                     barrier.wait();
                     let repo = SqliteRepository(path);
                     let mut tx = repo.begin().unwrap();
-                    tx.store.revision += 1;
+                    crate::repository::edit_fixture(&mut tx.store, |data| data.revision += 1);
                     tx.commit().unwrap();
                 })
             })
@@ -393,7 +397,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let repo = SqliteRepository(dir.path().into());
         let mut tx = repo.begin().unwrap();
-        tx.store.revision = 42;
+        crate::repository::edit_fixture(&mut tx.store, |data| data.revision = 42);
         for name in ["store.sqlite3-wal", "store.sqlite3-shm"] {
             assert_eq!(
                 fs::metadata(dir.path().join(name))
@@ -434,7 +438,7 @@ mod tests {
         );
         assert_eq!(fs::read(&path).unwrap(), bytes);
         let mut tx = repo.begin().unwrap();
-        tx.store.revision += 10;
+        crate::repository::edit_fixture(&mut tx.store, |data| data.revision += 10);
         tx.commit().unwrap();
         // After successful import SQLite is authoritative, even if JSON changes.
         fs::write(&path, "broken legacy file").unwrap();
@@ -445,10 +449,12 @@ mod tests {
     fn legacy_v1_import_restores_hook_source() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = fixture();
-        store.schema_version = 1;
-        let agent = store.agents.values_mut().next().unwrap();
-        agent.sequence = 7;
-        agent.last_report_ms = Some(123);
+        crate::repository::edit_fixture(&mut store, |data| {
+            data.schema_version = 1;
+            let agent = data.agents.values_mut().next().unwrap();
+            agent.sequence = 7;
+            agent.last_report_ms = Some(123);
+        });
         fs::write(
             dir.path().join("store.json"),
             serde_json::to_vec(&store).unwrap(),
@@ -465,9 +471,9 @@ mod tests {
     fn corrupt_and_newer_legacy_files_are_preserved_and_import_can_retry() {
         for bytes in [
             b"{incomplete".to_vec(),
-            serde_json::to_vec(&Store {
+            serde_json::to_vec(&dashboard_core::StoreData {
                 schema_version: 999,
-                ..Store::default()
+                ..dashboard_core::StoreData::default()
             })
             .unwrap(),
         ] {
@@ -515,9 +521,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let repo = SqliteRepository(dir.path().into());
         let conn = repo.connect().unwrap();
-        let body = serde_json::to_string(&Store {
+        let body = serde_json::to_string(&dashboard_core::StoreData {
             schema_version: 999,
-            ..Store::default()
+            ..dashboard_core::StoreData::default()
         })
         .unwrap();
         conn.execute("UPDATE metadata SET body=?1 WHERE id='store'", [&body])
@@ -555,11 +561,13 @@ mod tests {
         let conn = repo.connect().unwrap();
         conn.execute_batch("CREATE TRIGGER preserve_agent BEFORE UPDATE ON agents BEGIN SELECT RAISE(ABORT, 'unchanged agent rewritten'); END;").unwrap();
         let mut tx = repo.begin().unwrap();
-        tx.store.requests.clear();
-        tx.store.launches.clear();
-        tx.store.activities.clear();
-        tx.store.recent_directories.clear();
-        tx.store.revision += 1;
+        crate::repository::edit_fixture(&mut tx.store, |data| {
+            data.requests.clear();
+            data.launches.clear();
+            data.activities.clear();
+            data.recent_directories.clear();
+        });
+        crate::repository::edit_fixture(&mut tx.store, |data| data.revision += 1);
         tx.commit().unwrap();
         let restored = repo.read().unwrap();
         assert!(!restored.agents.is_empty());

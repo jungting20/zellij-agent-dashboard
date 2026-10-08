@@ -107,6 +107,7 @@ pub struct Catalog {
 impl Store {
     pub fn validate_target(&self, target: &Identity) -> Result<(), String> {
         let agent = self
+            .data
             .agents
             .get(&target.agent_id)
             .ok_or("agent no longer exists")?;
@@ -122,35 +123,22 @@ impl Store {
         if request.request_id.is_empty() || request.request_id.len() > 160 {
             return Err("invalid request ID".into());
         }
-        if let Some(previous) = self.requests.get(&request.request_id) {
+        if let Some(previous) = self.data.requests.get(&request.request_id) {
             if previous.request != *request {
                 return Err("request ID reused with different action".into());
             }
             return Ok(false);
         }
-        if self.requests.len() >= 4096 {
+        if self.data.requests.len() >= 4096 {
             return Err("request history full; archive the state after closing dashboards".into());
         }
         if let Some(target) = request.action.target() {
             self.validate_target(target)?;
         }
         if let Action::Close { target } = &request.action {
-            let mut id = target.agent_id.as_str();
-            let mut seen = std::collections::BTreeSet::new();
-            while seen.insert(id) {
-                let Some(agent) = self.agents.get(id) else {
-                    break;
-                };
-                if agent.pinned {
-                    return Err("고정된 에이전트는 먼저 고정을 해제해야 종료할 수 있습니다".into());
-                }
-                let Some(parent) = &agent.parent_id else {
-                    break;
-                };
-                id = parent;
-            }
+            self.validate_close(target)?;
         }
-        self.requests.insert(
+        self.data.requests.insert(
             request.request_id.clone(),
             ActionResult {
                 request: request.clone(),
@@ -161,7 +149,7 @@ impl Store {
                 path: String::new(),
             },
         );
-        self.revision += 1;
+        self.data.revision += 1;
         Ok(true)
     }
 
@@ -169,9 +157,9 @@ impl Store {
         if cwd.is_empty() {
             return;
         }
-        self.recent_directories.retain(|p| p != cwd);
-        self.recent_directories.insert(0, cwd.into());
-        self.recent_directories.truncate(100);
+        self.data.recent_directories.retain(|p| p != cwd);
+        self.data.recent_directories.insert(0, cwd.into());
+        self.data.recent_directories.truncate(100);
     }
 }
 

@@ -8,7 +8,7 @@ use crate::{
     terminal::SessionId,
 };
 use dashboard_core::{
-    Liveness, PanePresence, ScanLease, Snapshot, StateSignal, StatusObservation, StatusSource,
+    Liveness, PanePresence, Snapshot, StateSignal, StatusObservation, StatusSource,
 };
 use std::time::{Duration, Instant};
 
@@ -17,27 +17,15 @@ pub fn scan(deps: &HostDependencies) -> Result<Snapshot, String> {
     {
         let mut locked = deps.repository.begin()?;
         let at = now_ms();
-        if at.saturating_sub(locked.store.last_scan_ms) < 1800
-            || locked
-                .store
-                .scan_lease
-                .as_ref()
-                .is_some_and(|lease| lease.expires_at_ms > at)
-        {
+        if !locked.store.claim_scan(&token, at) {
             return Ok(locked.store.snapshot(at));
         }
-        // A crashed helper releases its claim by expiry, including after reload.
-        locked.store.scan_lease = Some(ScanLease {
-            token: token.clone(),
-            expires_at_ms: at + 10_000,
-        });
         locked.commit()?;
     }
     let result = collect(deps, &token);
     // Release on success or failure; never release a newer helper's claim.
     let mut locked = deps.repository.begin()?;
-    if owns_claim(&locked, &token) {
-        locked.store.scan_lease = None;
+    if locked.store.release_scan(&token) {
         locked.commit()?;
     }
     result?;
@@ -45,11 +33,7 @@ pub fn scan(deps: &HostDependencies) -> Result<Snapshot, String> {
 }
 
 fn owns_claim(locked: &crate::repository::UnitOfWork, token: &str) -> bool {
-    locked
-        .store
-        .scan_lease
-        .as_ref()
-        .is_some_and(|lease| lease.token == token && lease.expires_at_ms > now_ms())
+    locked.store.owns_scan(token, now_ms())
 }
 
 fn collect(deps: &HostDependencies, token: &str) -> Result<(), String> {
@@ -134,24 +118,16 @@ fn collect(deps: &HostDependencies, token: &str) -> Result<(), String> {
     }
     locked.store.reconcile(&verified.found, verified_at);
     for agent in collected.agents.values() {
-        if verified.found.iter().any(|p| p.identity == agent.identity)
-            && locked
-                .store
-                .observe_pane(&agent.identity, agent.pane.clone())
-        {
-            if let Some(current) = locked.store.agents.get_mut(&agent.identity.agent_id) {
-                if current.status_source != StatusSource::Hook {
-                    current.cwd = agent.cwd.clone();
-                }
-            }
+        if verified.found.iter().any(|p| p.identity == agent.identity) {
+            locked.store.observe_pane_with_cwd(
+                &agent.identity,
+                agent.pane.clone(),
+                Some(&agent.cwd),
+            );
         }
     }
     for (identity, at) in attempts {
-        if let Some(agent) = locked.store.agents.get_mut(&identity.agent_id) {
-            if agent.identity == identity {
-                agent.last_screen_attempt_ms = at;
-            }
-        }
+        locked.store.note_screen_attempt(&identity, at);
     }
     for signal in signals {
         locked.store.apply_signal(&signal)?;
@@ -166,7 +142,9 @@ mod tests {
         command::{CommandError, CommandOutput, CommandRunner, CommandSpec},
         terminal::{NewPane, PaneId, TerminalHost, TerminalPane},
     };
-    use dashboard_core::{AgentEvent, EventKind, Identity, Status, EVENT_SCHEMA_VERSION};
+    use dashboard_core::{
+        AgentEvent, EventKind, Identity, ScanLease, Status, EVENT_SCHEMA_VERSION,
+    };
     use std::{
         cell::Cell,
         path::{Path, PathBuf},
@@ -311,9 +289,11 @@ mod tests {
         let identity = fake.seed();
         {
             let mut locked = crate::repository::at(dir.path()).begin().unwrap();
-            locked.store.scan_lease = Some(ScanLease {
-                token: "crashed".into(),
-                expires_at_ms: now_ms() - 1,
+            crate::repository::edit_fixture(&mut locked.store, |data| {
+                data.scan_lease = Some(ScanLease {
+                    token: "crashed".into(),
+                    expires_at_ms: now_ms() - 1,
+                })
             });
             locked.commit().unwrap();
         }
@@ -384,9 +364,11 @@ mod tests {
         let identity = fake.seed();
         {
             let mut locked = crate::repository::at(dir.path()).begin().unwrap();
-            let agent = locked.store.agents.get_mut(&identity.agent_id).unwrap();
-            agent.status = Status::Working;
-            agent.idle_confirmations = 2;
+            crate::repository::edit_fixture(&mut locked.store, |data| {
+                let agent = data.agents.get_mut(&identity.agent_id).unwrap();
+                agent.status = Status::Working;
+                agent.idle_confirmations = 2;
+            });
             locked.commit().unwrap();
         }
         scan(&fake.deps()).unwrap();
@@ -404,7 +386,9 @@ mod tests {
         fake.missing_pane = true;
         let identity = fake.seed();
         let mut tx = fake.repository.begin().unwrap();
-        tx.store.agents.get_mut(&identity.agent_id).unwrap().status = Status::Working;
+        crate::repository::edit_fixture(&mut tx.store, |data| {
+            data.agents.get_mut(&identity.agent_id).unwrap().status = Status::Working
+        });
         tx.commit().unwrap();
         let snapshot = scan(&fake.deps()).unwrap();
         let agent = snapshot
@@ -429,11 +413,13 @@ mod tests {
         fake.fail = true;
         let identity = fake.seed();
         let mut tx = fake.repository.begin().unwrap();
-        let agent = tx.store.agents.get_mut(&identity.agent_id).unwrap();
-        agent.status = Status::Working;
-        agent.pane.presence = PanePresence::Present;
-        agent.pane.observed_at_ms = now_ms() - 1000;
-        let old = agent.pane.clone();
+        crate::repository::edit_fixture(&mut tx.store, |data| {
+            let agent = data.agents.get_mut(&identity.agent_id).unwrap();
+            agent.status = Status::Working;
+            agent.pane.presence = PanePresence::Present;
+            agent.pane.observed_at_ms = now_ms() - 1000;
+        });
+        let old = tx.store.agents[&identity.agent_id].pane.clone();
         tx.commit().unwrap();
         let snapshot = scan(&fake.deps()).unwrap();
         let agent = snapshot

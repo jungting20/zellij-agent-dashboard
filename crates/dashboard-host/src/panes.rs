@@ -4,9 +4,7 @@ use crate::{
     repository::now_ms,
     terminal::{SessionId, TerminalPane},
 };
-use dashboard_core::{
-    Agent, Identity, Liveness, PaneInfo, PaneOutput, PanePresence, StatusSource, Store,
-};
+use dashboard_core::{Agent, Identity, Liveness, PaneInfo, PaneOutput, PanePresence, Store};
 use std::{
     collections::BTreeSet,
     time::{Duration, Instant},
@@ -32,14 +30,8 @@ fn apply_metadata(store: &mut Store, session: &str, panes: &[TerminalPane], obse
             info.tab_name.clone_from(&pane.tab_name);
             info.title.clone_from(&pane.title);
         }
-        if store.observe_pane(&identity, info) {
-            let agent = store.agents.get_mut(&identity.agent_id).unwrap();
-            if agent.status_source != StatusSource::Hook {
-                if let Some(cwd) = pane.and_then(|p| p.cwd.as_ref()).filter(|s| !s.is_empty()) {
-                    agent.cwd.clone_from(cwd);
-                }
-            }
-        }
+        let cwd = pane.and_then(|p| p.cwd.as_deref());
+        store.observe_pane_with_cwd(&identity, info, cwd);
     }
 }
 
@@ -130,6 +122,7 @@ pub fn preview(agent: &Agent, deps: &HostDependencies) -> Result<PaneOutput, Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dashboard_core::StatusSource;
     use dashboard_core::{FoundProcess, Identity};
 
     #[test]
@@ -161,13 +154,21 @@ mod tests {
         apply_metadata(&mut store, "한글 세션", &panes, 1001);
         assert_eq!(store.agents["a"].pane.tab_id, Some(2));
         assert_eq!(store.agents["a"].cwd, "/actual");
-        store.agents.get_mut("a").unwrap().last_report_ms = Some(1000);
-        store.agents.get_mut("a").unwrap().status_source = StatusSource::Screen;
+        crate::repository::edit_fixture(&mut store, |data| {
+            data.agents.get_mut("a").unwrap().last_report_ms = Some(1000)
+        });
+        crate::repository::edit_fixture(&mut store, |data| {
+            data.agents.get_mut("a").unwrap().status_source = StatusSource::Screen
+        });
         panes[0].cwd = Some("/screen-project".into());
         apply_metadata(&mut store, "한글 세션", &panes, 1001);
         assert_eq!(store.agents["a"].cwd, "/screen-project");
-        store.agents.get_mut("a").unwrap().status_source = StatusSource::Hook;
-        store.agents.get_mut("a").unwrap().cwd = "/hook".into();
+        crate::repository::edit_fixture(&mut store, |data| {
+            data.agents.get_mut("a").unwrap().status_source = StatusSource::Hook
+        });
+        crate::repository::edit_fixture(&mut store, |data| {
+            data.agents.get_mut("a").unwrap().cwd = "/hook".into()
+        });
         apply_metadata(&mut store, "한글 세션", &panes, 1001);
         assert_eq!(store.agents["a"].cwd, "/hook");
         assert_eq!(store.agents["a"].pane.tab_id, Some(2));

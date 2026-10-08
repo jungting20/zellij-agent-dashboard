@@ -834,7 +834,7 @@ mod tests {
             })
             .collect();
         store.reconcile(&found, 1000);
-        for agent in store.agents.values_mut() {
+        for agent in store.data.agents.values_mut() {
             agent.pane.presence = crate::PanePresence::Present;
             agent.pane.observed_at_ms = 1000;
         }

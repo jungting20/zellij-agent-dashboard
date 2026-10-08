@@ -1,6 +1,7 @@
 mod actions;
 pub mod menu;
 mod model;
+mod mutations;
 mod signals;
 mod text;
 pub mod view;
