@@ -238,19 +238,7 @@ impl View {
                 false,
             ));
         }
-        let activity_count = snapshot
-            .activities
-            .len()
-            .min(3)
-            .min(height.saturating_sub(7));
-        let activity_height = if activity_count > 0 {
-            activity_count + 1
-        } else {
-            0
-        };
-        let mut body_height = height
-            .saturating_sub(lines.len() + 2 + activity_height)
-            .max(1);
+        let mut body_height = height.saturating_sub(lines.len() + 2).max(1);
         let instruction =
             self.instruction_preview(snapshot, body_height.saturating_sub(3).min(4), width);
         body_height = body_height.saturating_sub(instruction.len()).max(1);
@@ -281,19 +269,6 @@ impl View {
         }
         lines.extend(instruction);
         lines.extend(output);
-        if activity_count > 0 {
-            lines.push(Line::color("── 최근 상태 변화 ──", MUTED, false));
-            for activity in snapshot.activities.iter().rev().take(activity_count) {
-                let previous = activity.previous.map(status_korean).unwrap_or("기록 없음");
-                lines.push(Line::plain(format!(
-                    "{}: {} → {} · {}",
-                    activity.project,
-                    previous,
-                    status_korean(activity.status),
-                    relative_age(snapshot.now_ms.saturating_sub(activity.at_ms))
-                )));
-            }
-        }
         let text = if message == "Connected" {
             self.selected(snapshot)
                 .map(|a| {
@@ -430,11 +405,29 @@ impl View {
     }
 
     fn panel(&self, snapshot: &Snapshot, pinned: bool, width: usize, height: usize) -> Vec<Line> {
-        let label = format!(
+        let agents = self.panel_rows(snapshot, pinned);
+        let mut label = format!(
             "── {} ({}) ",
             if pinned { "PINNED" } else { "UNPINNED" },
-            self.panel_rows(snapshot, pinned).len()
+            agents.len()
         );
+        if let Some(activity) = snapshot.activities.iter().rev().find(|activity| {
+            agents
+                .iter()
+                .any(|agent| agent.identity.agent_id == activity.agent_id)
+        }) {
+            let detail = format!(
+                "{}: {} → {} · {}",
+                activity.project,
+                activity.previous.map(status_korean).unwrap_or("기록 없음"),
+                status_korean(activity.status),
+                relative_age(snapshot.now_ms.saturating_sub(activity.at_ms))
+            );
+            let available = width.saturating_sub(label.width() + 3);
+            if available > 0 {
+                label.push_str(&format!("({}) ", truncate(&detail, available)));
+            }
+        }
         let mut heading = Line::color(
             format!(
                 "{}{}",

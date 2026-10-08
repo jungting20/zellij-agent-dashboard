@@ -157,3 +157,9 @@ Zellij 0.45.0에서 `python3 scripts/smoke.py`를 통과했다. 결과는 `.loca
 `./scripts/check.sh`에서 코어 29개·호스트 50개 테스트, 포맷·네이티브/WASI Clippy와 스크립트 구문 검사를 통과했고 release host/WASM을 빌드했다. Zellij 0.45.0 임시 세션 `zad-window-manual-test`의 80×24 화면에서 Alt+q로 72×21 창을 생성하고 반복 입력 시 같은 pane 재사용, terminal pane 추가 없음, 두 클라이언트에서 중복 없음, collector reload 뒤 재열기를 확인했다. 테스트 세션은 종료했다.
 
 전체 `scripts/smoke.py` 재실행은 임시 클라이언트 시작·권한 승인 자동화에서 시간 초과되어 완료되지 않았다. 기록은 `.local/smoke-6f748963cf`와 `.local/smoke-80659fec63`이다. 이 실행을 전체 회귀 검증 통과로 기록하지 않는다. 사용자 요청에 따라 전역 Alt+q 설정을 교체하고 현재 세션 `운영`의 collector에만 reload를 적용했다. 연결된 클라이언트가 없어 검증용 클라이언트를 잠시 붙여 reload와 permissions=true 응답을 확인한 뒤 detach했다.
+
+## 최근 상태 변화 제목 표시
+
+하단 활동 영역을 제거하고 고정/일반 목록 제목 옆 괄호 안에 현재 검색 결과에 속한 최신 상태 변화 한 건을 표시한다. 내용은 제목의 남은 너비에 맞춰 생략하며 별도 행을 차지하지 않는다. 상태 파일 구조는 변경하지 않았다.
+
+Rust 포맷 검사, 코어 테스트 29개와 WASM release 빌드를 통과했다. 임시 세션에서 대시보드 로딩·검색까지 확인했지만 plugin pane의 화면 조회를 이용한 제목 표시 검사는 시간 초과됐다. 전체 smoke 통과나 실제 표시 확인 성공으로 기록하지 않는다. 로그는 `.local/smoke-inline-activity.log`, 진단은 `.local/smoke-73e8805a72`다. 임시 세션과 프로세스는 정리했으며 운영 세션에 reload는 적용하지 않았다.
