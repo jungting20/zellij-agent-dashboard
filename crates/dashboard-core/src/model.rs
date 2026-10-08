@@ -2,7 +2,7 @@ use crate::{StateSignal, StatusObservation, StatusSource};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 pub const EVENT_SCHEMA_VERSION: u32 = 1;
 pub const STALE_AFTER_MS: u64 = 60_000;
 
@@ -114,8 +114,21 @@ pub struct Agent {
     pub last_instruction_ms: Option<u64>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PanePresence {
+    #[default]
+    Unknown,
+    Present,
+    Missing,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneInfo {
+    #[serde(default)]
+    pub presence: PanePresence,
+    #[serde(default)]
+    pub observed_at_ms: u64,
     pub tab_id: Option<u32>,
     pub tab_name: String,
     pub title: String,
@@ -128,6 +141,12 @@ pub struct PaneOutput {
 }
 
 impl Agent {
+    pub fn visible(&self) -> bool {
+        !self.ended
+            && self.liveness != Liveness::Gone
+            && self.pane.presence == PanePresence::Present
+    }
+
     pub fn stale(&self, now_ms: u64) -> bool {
         self.last_report_ms
             .is_some_and(|at| now_ms.saturating_sub(at) >= STALE_AFTER_MS)
@@ -259,6 +278,13 @@ impl Store {
                     agent.status_source = StatusSource::Hook;
                     agent.last_hook_report_ms = agent.last_report_ms;
                 }
+            }
+            self.schema_version = 2;
+        }
+        if self.schema_version == 2 {
+            for agent in self.agents.values_mut() {
+                agent.pane.presence = PanePresence::Unknown;
+                agent.pane.observed_at_ms = 0;
             }
             self.schema_version = SCHEMA_VERSION;
         }
@@ -487,6 +513,25 @@ impl Store {
         });
         self.last_scan_ms = now_ms;
         self.revision += 1;
+    }
+
+    /// Pane observations describe reachability, never the agent's work status.
+    /// Reject results for another process generation or an older pane query.
+    pub fn observe_pane(&mut self, identity: &Identity, pane: PaneInfo) -> bool {
+        let Some(agent) = self.agents.get_mut(&identity.agent_id) else {
+            return false;
+        };
+        if agent.identity != *identity
+            || agent.liveness != Liveness::Live
+            || agent.ended
+            || pane.observed_at_ms < agent.pane.observed_at_ms
+            || pane.presence == PanePresence::Unknown
+        {
+            return false;
+        }
+        agent.pane = pane;
+        self.revision += 1;
+        true
     }
 
     pub fn snapshot(&self, now_ms: u64) -> Snapshot {
@@ -832,7 +877,7 @@ mod tests {
         }
         let mut migrated: Store = serde_json::from_value(value).unwrap();
         migrated.migrate().unwrap();
-        assert_eq!(migrated.schema_version, 2);
+        assert_eq!(migrated.schema_version, SCHEMA_VERSION);
         assert_eq!(migrated.agents["run"].status_source, StatusSource::Hook);
         assert_eq!(migrated.agents["run"].status, Status::Done);
         assert_eq!(
@@ -842,5 +887,65 @@ mod tests {
         let before = serde_json::to_string(&migrated).unwrap();
         migrated.migrate().unwrap();
         assert_eq!(serde_json::to_string(&migrated).unwrap(), before);
+    }
+
+    #[test]
+    fn pane_observations_preserve_work_and_reject_late_or_reused_generations() {
+        let mut store = Store::default();
+        let original = found("run");
+        store.reconcile(&[original.clone()], 1000);
+        store.agents.get_mut("run").unwrap().status = Status::Working;
+        let present = PaneInfo {
+            presence: PanePresence::Present,
+            observed_at_ms: 2000,
+            ..PaneInfo::default()
+        };
+        assert!(store.observe_pane(&original.identity, present.clone()));
+        assert!(store.observe_pane(
+            &original.identity,
+            PaneInfo {
+                presence: PanePresence::Missing,
+                observed_at_ms: 3000,
+                ..PaneInfo::default()
+            }
+        ));
+        assert!(!store.observe_pane(&original.identity, present.clone()));
+        assert_eq!(store.agents["run"].status, Status::Working);
+        assert_eq!(store.agents["run"].liveness, Liveness::Live);
+        assert_eq!(store.agents["run"].pane.presence, PanePresence::Missing);
+        store.reconcile(&[found("replacement")], 4000);
+        assert!(!store.observe_pane(&original.identity, present));
+        assert_eq!(
+            store.agents["replacement"].pane.presence,
+            PanePresence::Unknown
+        );
+        let mut wrong = found("replacement").identity;
+        wrong.incarnation_id = "old-generation".into();
+        assert!(!store.observe_pane(
+            &wrong,
+            PaneInfo {
+                presence: PanePresence::Present,
+                observed_at_ms: 5000,
+                ..PaneInfo::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn version_two_migration_requires_fresh_pane_evidence() {
+        let mut store = Store::default();
+        store.reconcile(&[found("run")], 1000);
+        store.schema_version = 2;
+        store.agents.get_mut("run").unwrap().pane.title = "old pane".into();
+        let mut value = serde_json::to_value(&store).unwrap();
+        let pane = value["agents"]["run"]["pane"].as_object_mut().unwrap();
+        pane.remove("presence");
+        pane.remove("observed_at_ms");
+        let mut restored: Store = serde_json::from_value(value).unwrap();
+        restored.migrate().unwrap();
+        assert_eq!(restored.schema_version, 3);
+        assert_eq!(restored.agents["run"].pane.presence, PanePresence::Unknown);
+        assert!(!restored.agents["run"].visible());
+        assert_eq!(restored.agents["run"].pane.title, "old pane");
     }
 }

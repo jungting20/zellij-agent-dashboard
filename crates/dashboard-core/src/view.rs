@@ -45,6 +45,7 @@ impl View {
         let mut rows: Vec<_> = snapshot
             .agents
             .iter()
+            .filter(|a| a.visible())
             .filter(|a| {
                 query.is_empty()
                     || format!(
@@ -708,7 +709,7 @@ fn hierarchy_root<'a>(snapshot: &'a Snapshot, mut agent: &'a Agent) -> &'a Agent
         let Some(next) = snapshot
             .agents
             .iter()
-            .find(|a| &a.identity.agent_id == parent)
+            .find(|a| &a.identity.agent_id == parent && a.visible())
         else {
             break;
         };
@@ -728,7 +729,7 @@ fn child_label<'a>(snapshot: &'a Snapshot, mut agent: &'a Agent) -> String {
         let Some(next) = snapshot
             .agents
             .iter()
-            .find(|a| &a.identity.agent_id == parent)
+            .find(|a| &a.identity.agent_id == parent && a.visible())
         else {
             break;
         };
@@ -833,6 +834,10 @@ mod tests {
             })
             .collect();
         store.reconcile(&found, 1000);
+        for agent in store.agents.values_mut() {
+            agent.pane.presence = crate::PanePresence::Present;
+            agent.pane.observed_at_ms = 1000;
+        }
         store.snapshot(1000)
     }
 
@@ -950,5 +955,45 @@ mod tests {
         let popup = view.render_plain(&snapshot, 24, 80, "Connected").join("\n");
         assert!(popup.contains("마지막 지시"));
         assert!(popup.contains("두 번째 줄"));
+    }
+
+    #[test]
+    fn only_reachable_current_agents_appear_and_hidden_parents_do_not_pin_children() {
+        let mut snapshot = populated();
+        let parent = snapshot.agents[0].identity.agent_id.clone();
+        snapshot.agents[0].pinned = true;
+        snapshot.agents[0].liveness = Liveness::Gone;
+        snapshot.agents[1].parent_id = Some(parent.clone());
+        snapshot.agents[2].pane.presence = crate::PanePresence::Missing;
+        snapshot.agents[3].pane.presence = crate::PanePresence::Unknown;
+        snapshot.agents[4].ended = true;
+        snapshot.agents[5].liveness = Liveness::Unverified;
+        snapshot.agents[6].status = Status::Done;
+        let mut view = View {
+            selected_id: Some(parent),
+            ..View::default()
+        };
+        view.reconcile_selection(&snapshot);
+        assert_eq!(view.rows(&snapshot).len(), snapshot.agents.len() - 4);
+        assert!(view.panel_rows(&snapshot, true).is_empty());
+        assert_eq!(
+            view.selected_id.as_ref(),
+            Some(&view.rows(&snapshot)[0].identity.agent_id)
+        );
+        assert!(view
+            .panel_rows(&snapshot, false)
+            .iter()
+            .any(|a| a.identity == snapshot.agents[1].identity));
+        assert!(view
+            .rows(&snapshot)
+            .iter()
+            .any(|a| a.liveness == Liveness::Unverified));
+        assert!(view
+            .rows(&snapshot)
+            .iter()
+            .any(|a| a.status == Status::Done));
+        view.query = "old deleted pane".into();
+        snapshot.agents[0].alias = view.query.clone();
+        assert!(view.rows(&snapshot).is_empty());
     }
 }

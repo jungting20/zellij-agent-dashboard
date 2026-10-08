@@ -1,7 +1,7 @@
 use crate::{
     command::{self, CommandSpec},
     host::{pane_id, pane_number, HostDependencies},
-    process,
+    panes, process,
     repository::now_ms,
     terminal::{NewPane, SessionId},
 };
@@ -115,14 +115,31 @@ pub fn link_launches(store: &mut dashboard_core::Store, inventory: &process::Inv
 }
 
 fn checked(target: &Identity, deps: &HostDependencies) -> Result<Agent, String> {
+    let pane = panes::require_present(target, deps)?;
     let inventory_at = now_ms();
     let inventory = process::inventory(deps.runner)?;
     let mut locked = deps.repository.begin()?;
     locked.store.reconcile(&inventory.found, inventory_at);
     link_launches(&mut locked.store, &inventory);
     locked.store.validate_target(target)?;
+    if !locked.store.observe_pane(target, pane)
+        && locked.store.agents[&target.agent_id].pane.presence
+            != dashboard_core::PanePresence::Present
+    {
+        return Err("agent pane changed during verification".into());
+    }
     locked.commit()?;
     Ok(locked.store.agents[&target.agent_id].clone())
+}
+
+pub fn resolve(id: &str, deps: &HostDependencies) -> Result<Agent, String> {
+    let store = deps.repository.read()?;
+    let identity = &store
+        .agents
+        .get(id)
+        .ok_or("agent no longer exists")?
+        .identity;
+    checked(identity, deps)
 }
 
 fn cwd(value: &str) -> Result<PathBuf, String> {
@@ -597,6 +614,7 @@ mod tests {
     #[derive(Default)]
     struct FakeHost {
         changed: Cell<bool>,
+        missing_pane: Cell<bool>,
         change_after_paste: Cell<bool>,
         calls: RefCell<Vec<String>>,
     }
@@ -649,7 +667,17 @@ mod tests {
             _: bool,
             _: Duration,
         ) -> Result<Vec<TerminalPane>, String> {
-            panic!("unexpected list")
+            Ok(if self.missing_pane.get() {
+                vec![]
+            } else {
+                vec![TerminalPane {
+                    id: pane_id(7),
+                    tab_id: None,
+                    tab_name: String::new(),
+                    title: String::new(),
+                    cwd: None,
+                }]
+            })
         }
         fn screen(&self, _: &SessionId, _: &PaneId) -> Result<String, String> {
             panic!("unexpected screen")
@@ -768,6 +796,37 @@ mod tests {
         };
         let error = action(directory.path(), request, &deps).unwrap_err();
         assert!(error.contains("고정"));
+        assert!(fake.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn missing_pane_blocks_resolution_and_input_even_when_process_is_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeHost::default();
+        let target = fake.seed(dir.path());
+        fake.missing_pane.set(true);
+        let repository = crate::repository::at(dir.path());
+        let deps = HostDependencies {
+            repository: repository.as_ref(),
+            runner: &fake,
+            terminal: &fake,
+        };
+        assert!(resolve(&target.agent_id, &deps)
+            .unwrap_err()
+            .contains("pane no longer exists"));
+        let result = action(
+            dir.path(),
+            ActionRequest {
+                request_id: "missing".into(),
+                action: Action::Input {
+                    target,
+                    text: "must not send".into(),
+                },
+            },
+            &deps,
+        )
+        .unwrap();
+        assert_eq!(result.state, RequestState::Uncertain);
         assert!(fake.calls.borrow().is_empty());
     }
 }

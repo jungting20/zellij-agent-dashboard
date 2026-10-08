@@ -120,6 +120,7 @@ load_plugins {{
 ''')
     sessions = [f"zad-smoke-{run_id}", f"zad smoke {run_id}"]
     clients = []
+    background_fixtures = []
     base_config = f"host_path={host},state_dir={state}"
 
     def call(session, *command, timeout=8):
@@ -233,6 +234,27 @@ fn main() {
                  and current_screen_row()["status"] == "working")
         show_fixture(":unknown")
         wait_for("unmatched idle requires fresh confirmations", lambda: current_screen_row()["status"] == "idle")
+        # Processes can outlive their pane while retaining its environment.
+        orphan_environment = os.environ.copy()
+        orphan_environment["ZELLIJ_SESSION_NAME"] = first
+        orphan_environment["ZELLIJ_PANE_ID"] = "999999"
+        for arguments in [[], ["app-server"]]:
+            background_fixtures.append(subprocess.Popen([str(fake), *arguments], env=orphan_environment,
+                                        cwd=directory, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL))
+        orphan, app_server = background_fixtures
+        def missing_pane_record():
+            host_call("scan")
+            return next((a for a in host_call("snapshot")["agents"]
+                         if a["identity"]["pid"] == orphan.pid and a["pane"]["presence"] == "missing"), None)
+        missing = wait_for("live orphan process has confirmed missing pane", missing_pane_record)
+        assert missing["liveness"] == "live"
+        assert all(a["identity"]["pid"] != app_server.pid for a in host_call("snapshot")["agents"])
+        rejected = subprocess.run([str(host), "--state-dir", str(state), "resolve", missing["identity"]["agent_id"]],
+                                  capture_output=True, text=True)
+        assert rejected.returncode == 1 and "pane no longer exists" in rejected.stderr
+        print("PASS app-server excluded and missing pane focus rejected", flush=True)
+
         # Drive host adapters with a local fixture, never a model request.
         action_environment = os.environ.copy()
         # A caller's pane ID belongs to its own session, not this test session.
@@ -335,6 +357,12 @@ fn main() {
                        stdin=subprocess.DEVNULL, capture_output=True, text=True, check=True, timeout=8)
         wait_for("launcher opens floating dashboard", lambda: any(p["revision"] is not None
                  for p in ping(first, "dashboard", ROOT / "dist/agent-dashboard.wasm")))
+        # Discovery includes other live user sessions. Restrict the UI search to
+        # this test session, whose agents are now ended or have no pane.
+        os.write(clients[-1].fd, f"/{first}\r".encode())
+        wait_for("ended and missing panes excluded from selection",
+                 lambda: any(p["revision"] is not None and p["query"] == first and p["selected_id"] is None
+                             for p in ping(first, "dashboard", ROOT / "dist/agent-dashboard.wasm")))
         # Keep optional tool onboarding after the collector lifecycle checks.
         if args.real_claude:
             claude = shutil.which("claude")
@@ -370,9 +398,15 @@ fn main() {
             assert metadata["revision"] >= 17
             assert database.execute("SELECT count(*) FROM agents").fetchone()[0] >= 2
         print("PASS SQLite persistence, integrity and preserved JSON import", flush=True)
-        (directory / "result.json").write_text(json.dumps({"passed":True, "sessions":sessions, "real_claude":args.real_claude, "screen_adapter":True, "sqlite_repository":True, "legacy_import":True}, indent=2))
+        (directory / "result.json").write_text(json.dumps({"passed":True, "sessions":sessions, "real_claude":args.real_claude, "screen_adapter":True, "sqlite_repository":True, "legacy_import":True, "pane_presence":True}, indent=2))
         print(f"Artifacts: {directory}", flush=True)
     finally:
+        for fixture in background_fixtures:
+            if fixture.poll() is None:
+                fixture.terminate()
+                fixture.wait(timeout=5)
+            if fixture.stdin:
+                fixture.stdin.close()
         for session in sessions:
             subprocess.run([zellij, "kill-session", session], stdin=subprocess.DEVNULL, capture_output=True, timeout=5)
         for client in clients:

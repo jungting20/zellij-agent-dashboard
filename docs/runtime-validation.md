@@ -85,3 +85,15 @@ JSON 파일 저장 호출을 `Repository::read()`와 `Repository::begin()` / `Un
 Zellij 0.45.0의 소유한 임시 세션 두 개에서 `python3 scripts/smoke.py --real-claude`를 통과했다. 결과는 `.local/smoke-c29d923c5f/result.json`에 남겼고 검사 종료 후 임시 세션을 종료했다. JSON 이관 원본의 바이트 보존, 두 세션·멀티 클라이언트 수집, 화면 판별과 훅 전환, 중복 입력·종료·별칭 요청, 세션 이동, 전체 detach 후 수집, 재연결·collector reload, 고정·별칭·요청 결과 복원, 실제 Claude SessionStart 훅, SQLite `integrity_check=ok`, WAL과 DB 구조 버전을 확인했다. Claude에는 프롬프트를 제출하거나 모델 요청을 하지 않았다. 운영 세션에 설치나 reload를 적용하지 않았다.
 
 통합 검증에서 고정을 검색 검사보다 먼저 수행하면 대상 행이 다른 패널로 이동하므로 고정 검사를 세션 이동 뒤에 수행하도록 조정했다. 재연결 직후에는 백그라운드 collector 응답만으로 클라이언트 등록을 판단하지 않고 `list-clients`로 실제 등록을 확인한 뒤 reload한다. 이 대기 추가 전에는 reload 직후 pipe 응답이 시간 초과됐으며, 추가 후 전체 검증이 통과했다.
+
+## 2026-10-08 이동 가능한 에이전트 목록과 pane 확인
+
+기본 목록은 종료되지 않았고 `gone`이 아니며 실제 terminal pane이 확인된 실행만 표시한다. 종료 기록은 24시간 보관하되 목록에서 숨긴다. Codex `app-server`의 native/Node 런처를 발견 대상에서 제외한다. pane 존재 여부는 `PanePresence`와 관측 시각으로 저장하며 프로세스 생존이나 작업 상태를 바꾸지 않는다. 조회 실패는 이전 pane 확인 결과를 유지하고, 실행 세대가 교체되거나 더 최신 pane 결과가 저장되면 늦은 결과를 거부한다. resolve·입력·종료 대상 검증과 preview는 pane 목록을 다시 확인한다.
+
+Store/스냅샷 스키마는 3으로 올렸다. 스키마 1/2는 자동 이관하며 기존 pane 제목으로 존재를 추정하지 않고 `unknown`, 관측 시각 0으로 초기화한다. SQLite DB 구조 버전 1과 이벤트 JSON 버전 1은 유지한다. 상태 백업과 이전 host/WASM은 `.local/backup-before-pane-presence-66b3d2a4de/`에 보존했다.
+
+`./scripts/check.sh`에서 코어 24개와 호스트 40개, 총 64개 테스트, 포맷, 네이티브/WASI Clippy와 셸/Python 구문 검사를 통과했다. `./scripts/build.sh`로 네이티브 host와 wasm32-wasip1 release 플러그인을 빌드했다. 추가 테스트는 app-server 오탐, 종료·부재·미확인 pane의 목록 제외, 숨긴 부모의 고정 상속 방지, pane 부재에도 작업 상태 보존, 조회 실패 시 기존 pane 확인 유지, pane 조회의 역순·실행 세대 교체, 스키마 2 이관, 프로세스가 살아 있어도 부재 pane에 대한 이동·입력 차단을 포함한다.
+
+`python3 scripts/smoke.py --real-claude`를 임시 Zellij 세션 두 개에서 통과했다. 결과는 `.local/smoke-04fb77e98d/result.json`이며 세션과 검증용 백그라운드 프로세스는 종료했다. pane ID 999999를 상속한 살아 있는 Codex fixture를 발견하되 pane을 `missing`으로 확인하고 resolve를 거절했다. `app-server` fixture는 발견되지 않았고, 테스트 세션으로 검색한 대시보드에서는 종료·부재 pane을 선택할 수 없었다. 입력·종료·중복 요청·세션 이동·detach·reload·SQLite 보존과 실제 Claude SessionStart 훅도 통과했다. 전체 세션을 수집하는 특성을 고려해 목록 제외 검증은 테스트 세션으로 검색 범위를 제한한다.
+
+사용자가 테스트하던 `study` 세션의 collector를 reload하고 대시보드 `plugin_11`을 열었다. 다른 운영 세션에는 설치·reload를 적용하지 않았다.

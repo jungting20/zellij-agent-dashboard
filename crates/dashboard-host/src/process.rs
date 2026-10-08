@@ -66,13 +66,29 @@ fn parse_line(line: &str) -> Result<Process, String> {
     })
 }
 
+fn codex_app_server<'a>(mut args: impl Iterator<Item = &'a str>) -> bool {
+    while let Some(arg) = args.next() {
+        match arg {
+            "--" => return false,
+            "-c" | "--config" | "--enable" | "--disable" | "-m" | "--model" | "-p"
+            | "--profile" | "-C" | "--cd" | "-a" | "--ask-for-approval" | "-s" | "--sandbox"
+            | "-i" | "--image" => {
+                args.next();
+            }
+            flag if flag.starts_with('-') => {}
+            command => return command == "app-server",
+        }
+    }
+    false
+}
+
 fn tool(command: &str) -> Option<&'static str> {
     let mut args = command.split_whitespace();
     let first = args.next()?;
     let name = Path::new(first).file_name()?.to_str()?;
     match name {
         "claude" => Some("claude"),
-        "codex" => Some("codex"),
+        "codex" => (!codex_app_server(args)).then_some("codex"),
         "agent" => Some("cursor"),
         "agy" => Some("gemini"),
         "hermes" => Some("hermes"),
@@ -83,7 +99,7 @@ fn tool(command: &str) -> Option<&'static str> {
             if script.contains("/@anthropic-ai/claude-code/") {
                 Some("claude")
             } else if script.contains("/@openai/codex/") {
-                Some("codex")
+                (!codex_app_server(args)).then_some("codex")
             } else if script.contains("/pi-coding-agent/") {
                 Some("pi")
             } else if script.contains("/@google/gemini-cli/") {
@@ -269,5 +285,18 @@ mod tests {
         );
         assert!(parse_inventory("truncated").is_err());
         assert!(parse_inventory("").is_err());
+    }
+
+    #[test]
+    fn excludes_codex_app_servers_with_inherited_terminal_environment() {
+        let text = "10 1 Mon Oct 5 10:00:00 2026 zellij --server /tmp/dev\n20 10 Mon Oct 5 10:01:00 2026 codex ZELLIJ_SESSION_NAME=dev ZELLIJ_PANE_ID=7\n21 1 Mon Oct 5 10:01:01 2026 codex app-server daemon ZELLIJ_SESSION_NAME=dev ZELLIJ_PANE_ID=8\n22 1 Mon Oct 5 10:01:02 2026 node /x/@openai/codex/bin/codex.js app-server --listen unix:// ZELLIJ_SESSION_NAME=dev ZELLIJ_PANE_ID=9\n23 1 Mon Oct 5 10:01:03 2026 /x/.codex/packages/app-server-daemon/releases/test/bin/codex --config x=1 app-server ZELLIJ_SESSION_NAME=dev ZELLIJ_PANE_ID=10\n";
+        let inventory = parse_inventory(text).unwrap();
+        assert_eq!(inventory.found.len(), 1);
+        assert_eq!(inventory.found[0].identity.pid, 20);
+        assert_eq!(tool("codex --config x=1 app-server --listen unix://"), None);
+        assert_eq!(
+            tool("/x/app-server-daemon/bin/codex -- interactive app-server prompt"),
+            Some("codex")
+        );
     }
 }

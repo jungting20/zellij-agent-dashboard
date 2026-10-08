@@ -12,7 +12,7 @@ mod sqlite_repository;
 mod terminal;
 mod zellij;
 
-use dashboard_core::{AgentEvent, ApplyResult, Liveness};
+use dashboard_core::{AgentEvent, ApplyResult};
 use repository::now_ms;
 use std::{
     env,
@@ -152,23 +152,10 @@ fn run(
             };
             json(&panes::preview(&agent, deps)?)
         }
-        "resolve" => {
-            let id = args.get(1).ok_or("resolve requires an agent ID")?;
-            let inventory_at = now_ms();
-            let inventory = process::inventory(deps.runner)?;
-            let mut locked = deps.repository.begin()?;
-            locked.store.reconcile(&inventory.found, inventory_at);
-            locked.commit()?;
-            let agent = locked
-                .store
-                .agents
-                .get(id)
-                .ok_or("agent no longer exists")?;
-            if agent.liveness != Liveness::Live {
-                return Err("agent process changed or exited; refresh the list".into());
-            }
-            json(agent)
-        }
+        "resolve" => json(&actions::resolve(
+            args.get(1).ok_or("resolve requires an agent ID")?,
+            deps,
+        )?),
         "ingest" => {
             let event: AgentEvent =
                 serde_json::from_str(&read_input()?).map_err(|e| e.to_string())?;

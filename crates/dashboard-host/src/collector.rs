@@ -7,7 +7,9 @@ use crate::{
     screen::Detector,
     terminal::SessionId,
 };
-use dashboard_core::{Liveness, ScanLease, Snapshot, StateSignal, StatusObservation, StatusSource};
+use dashboard_core::{
+    Liveness, PanePresence, ScanLease, Snapshot, StateSignal, StatusObservation, StatusSource,
+};
 use std::time::{Duration, Instant};
 
 pub fn scan(deps: &HostDependencies) -> Result<Snapshot, String> {
@@ -72,6 +74,7 @@ fn collect(deps: &HostDependencies, token: &str) -> Result<(), String> {
         .filter(|a| {
             a.liveness == Liveness::Live
                 && !a.ended
+                && a.pane.presence == PanePresence::Present
                 && a.status_source != StatusSource::Hook
                 && detector.supports(&a.tool)
                 && now_ms().saturating_sub(a.discovered_at_ms) >= 3000
@@ -131,9 +134,12 @@ fn collect(deps: &HostDependencies, token: &str) -> Result<(), String> {
     }
     locked.store.reconcile(&verified.found, verified_at);
     for agent in collected.agents.values() {
-        if verified.found.iter().any(|p| p.identity == agent.identity) {
+        if verified.found.iter().any(|p| p.identity == agent.identity)
+            && locked
+                .store
+                .observe_pane(&agent.identity, agent.pane.clone())
+        {
             if let Some(current) = locked.store.agents.get_mut(&agent.identity.agent_id) {
-                current.pane = agent.pane.clone();
                 if current.status_source != StatusSource::Hook {
                     current.cwd = agent.cwd.clone();
                 }
@@ -173,6 +179,8 @@ mod tests {
         replace: bool,
         hook: bool,
         fail: bool,
+        missing_pane: bool,
+        metadata_fail: bool,
         reads: Cell<u32>,
     }
     impl Fake {
@@ -219,6 +227,12 @@ mod tests {
         ) -> Result<Vec<TerminalPane>, String> {
             // This would time out if the collector held the state lock during I/O.
             let _locked = crate::repository::at(&self.dir).begin().unwrap();
+            if self.metadata_fail {
+                return Err("temporary list failure".into());
+            }
+            if self.missing_pane {
+                return Ok(vec![]);
+            }
             Ok(vec![TerminalPane {
                 id: pane_id(7),
                 tab_id: Some(1),
@@ -284,6 +298,8 @@ mod tests {
             replace: false,
             hook: false,
             fail: false,
+            missing_pane: false,
+            metadata_fail: false,
             reads: Cell::new(0),
         }
     }
@@ -379,5 +395,54 @@ mod tests {
         assert_eq!(agent.status, Status::Working);
         assert_eq!(agent.idle_confirmations, 0);
         assert_eq!(agent.last_report_ms, None);
+    }
+
+    #[test]
+    fn confirmed_missing_pane_hides_live_process_without_changing_work_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fake = fake(dir.path());
+        fake.missing_pane = true;
+        let identity = fake.seed();
+        let mut tx = fake.repository.begin().unwrap();
+        tx.store.agents.get_mut(&identity.agent_id).unwrap().status = Status::Working;
+        tx.commit().unwrap();
+        let snapshot = scan(&fake.deps()).unwrap();
+        let agent = snapshot
+            .agents
+            .iter()
+            .find(|a| a.identity == identity)
+            .unwrap();
+        assert_eq!(agent.liveness, Liveness::Live);
+        assert_eq!(agent.pane.presence, PanePresence::Missing);
+        assert_eq!(agent.status, Status::Working);
+        assert!(dashboard_core::view::View::default()
+            .rows(&snapshot)
+            .is_empty());
+        assert_eq!(fake.reads.get(), 0);
+    }
+
+    #[test]
+    fn failed_pane_query_preserves_last_confirmation_and_work_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fake = fake(dir.path());
+        fake.metadata_fail = true;
+        fake.fail = true;
+        let identity = fake.seed();
+        let mut tx = fake.repository.begin().unwrap();
+        let agent = tx.store.agents.get_mut(&identity.agent_id).unwrap();
+        agent.status = Status::Working;
+        agent.pane.presence = PanePresence::Present;
+        agent.pane.observed_at_ms = now_ms() - 1000;
+        let old = agent.pane.clone();
+        tx.commit().unwrap();
+        let snapshot = scan(&fake.deps()).unwrap();
+        let agent = snapshot
+            .agents
+            .iter()
+            .find(|a| a.identity == identity)
+            .unwrap();
+        assert_eq!(agent.pane, old);
+        assert_eq!(agent.status, Status::Working);
+        assert!(agent.visible());
     }
 }

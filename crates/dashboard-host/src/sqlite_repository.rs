@@ -455,7 +455,7 @@ mod tests {
         )
         .unwrap();
         let restored = SqliteRepository(dir.path().into()).read().unwrap();
-        assert_eq!(restored.schema_version, 2);
+        assert_eq!(restored.schema_version, dashboard_core::SCHEMA_VERSION);
         let agent = restored.agents.values().next().unwrap();
         assert_eq!(agent.status_source, dashboard_core::StatusSource::Hook);
         assert_eq!(agent.last_hook_report_ms, Some(123));
