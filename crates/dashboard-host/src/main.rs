@@ -125,7 +125,7 @@ fn run(
                 .map_err(|_| "pin requires true or false")?;
             let inventory_at = now_ms();
             let inventory = process::inventory(deps.runner)?;
-            let mut locked = deps.repository.begin()?;
+            let mut locked = deps.repository.begin_runtime()?;
             locked.store.reconcile(&inventory.found, inventory_at);
             locked.store.set_pinned(id, pinned)?;
             locked.commit()?;
@@ -145,7 +145,7 @@ fn run(
                 serde_json::from_str(&read_input()?).map_err(|e| e.to_string())?;
             let inventory_at = now_ms();
             let inventory = process::inventory(deps.runner)?;
-            let mut locked = deps.repository.begin()?;
+            let mut locked = deps.repository.begin_runtime()?;
             locked.store.reconcile(&inventory.found, inventory_at);
             let applied = locked.store.apply(&event)? == ApplyResult::Applied;
             locked.commit()?;
@@ -175,7 +175,7 @@ fn hook(deps: &host::HostDependencies) -> Result<(), String> {
     {
         let inventory_at = now_ms();
         let inventory = process::inventory(deps.runner)?;
-        let mut locked = deps.repository.begin()?;
+        let mut locked = deps.repository.begin_runtime()?;
         let found = inventory
             .found
             .iter()

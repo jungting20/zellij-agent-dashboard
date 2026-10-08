@@ -1,6 +1,6 @@
 use crate::{StateSignal, StatusObservation, StatusSource};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const SCHEMA_VERSION: u32 = 3;
 pub const EVENT_SCHEMA_VERSION: u32 = 1;
@@ -222,12 +222,29 @@ pub struct StoreData {
     pub recent_directories: Vec<String>,
 }
 
+/// IDs changed by core transitions; absent records are never implicit deletions.
+#[derive(Clone, Debug, Default)]
+pub struct ChangeSet {
+    pub metadata: bool,
+    pub agents: BTreeSet<String>,
+    pub removed_agents: BTreeSet<String>,
+    pub requests: BTreeSet<String>,
+    pub launches: BTreeSet<String>,
+    pub activities: bool,
+    pub recent_directories: bool,
+    pub replacement: bool,
+}
+
 /// Serialized persistence data is restored explicitly; live state is read-only
 /// outside core transitions. Deref deliberately has no DerefMut implementation.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Store {
     #[serde(flatten)]
     pub(crate) data: StoreData,
+    #[serde(skip)]
+    pub(crate) changes: ChangeSet,
+    #[serde(skip)]
+    pub(crate) request_total: Option<usize>,
 }
 
 impl std::ops::Deref for Store {
@@ -238,10 +255,45 @@ impl std::ops::Deref for Store {
 }
 
 impl Store {
+    /// Explicit full-state restoration/import. Do not use for partially loaded state.
     pub fn restore(data: StoreData) -> Result<Self, String> {
-        let mut store = Self { data };
+        let mut store = Self::loaded(data, None)?;
+        store.changes = ChangeSet {
+            metadata: true,
+            agents: store.agents.keys().cloned().collect(),
+            requests: store.requests.keys().cloned().collect(),
+            launches: store.launches.keys().cloned().collect(),
+            activities: true,
+            recent_directories: true,
+            replacement: true,
+            ..ChangeSet::default()
+        };
+        Ok(store)
+    }
+    /// Persistence hydration starts clean; migrations retain their own changes.
+    pub fn loaded(data: StoreData, request_total: Option<usize>) -> Result<Self, String> {
+        let mut store = Self {
+            data,
+            changes: ChangeSet::default(),
+            request_total,
+        };
         store.migrate()?;
         Ok(store)
+    }
+    pub fn changes(&self) -> &ChangeSet {
+        &self.changes
+    }
+    pub fn request_count(&self) -> usize {
+        self.request_total.unwrap_or(self.requests.len())
+    }
+    pub fn metadata(&self) -> StoreData {
+        StoreData {
+            schema_version: self.schema_version,
+            revision: self.revision,
+            last_scan_ms: self.last_scan_ms,
+            scan_lease: self.scan_lease.clone(),
+            ..StoreData::default()
+        }
     }
     pub fn into_data(self) -> StoreData {
         self.data
@@ -297,6 +349,10 @@ impl Store {
     /// v1 had only hook reports (and dashboard-generated events).
     /// Preserve those as hook-owned rather than overwrite historical state.
     pub fn migrate(&mut self) -> Result<(), String> {
+        if self.data.schema_version < SCHEMA_VERSION {
+            self.changes.metadata = true;
+            self.changes.agents.extend(self.data.agents.keys().cloned());
+        }
         if self.data.schema_version == 1 {
             for agent in self.data.agents.values_mut() {
                 agent.discovered_at_ms = agent.status_since_ms;
@@ -346,7 +402,9 @@ impl Store {
                 let agent = self.data.agents.get_mut(&identity.agent_id).unwrap();
                 agent.summary.clone_from(text);
                 agent.last_instruction_ms = Some(*observed_at_ms);
+                self.changes.agents.insert(identity.agent_id.clone());
                 self.data.revision += 1;
+                self.changes.metadata = true;
                 Ok(ApplyResult::Applied)
             }
         }
@@ -370,6 +428,7 @@ impl Store {
         {
             return Ok(ApplyResult::Ignored);
         }
+        self.changes.agents.insert(event.identity.agent_id.clone());
         agent.sequence = event.sequence;
         agent.status_source = StatusSource::Hook;
         agent.last_hook_report_ms = Some(event.observed_at_ms);
@@ -409,6 +468,7 @@ impl Store {
             let previous = agent.status;
             agent.status = next;
             agent.status_since_ms = event.observed_at_ms;
+            self.changes.activities = true;
             self.data.activities.push(Activity {
                 agent_id: agent.identity.agent_id.clone(),
                 at_ms: event.observed_at_ms,
@@ -423,6 +483,7 @@ impl Store {
             }
         }
         self.data.revision += 1;
+        self.changes.metadata = true;
         Ok(ApplyResult::Applied)
     }
 
@@ -449,6 +510,9 @@ impl Store {
         {
             return Ok(ApplyResult::Ignored);
         }
+        self.changes
+            .agents
+            .insert(observation.identity.agent_id.clone());
         // Only consecutive fresh samples count, never timer repeats of one screen.
         if agent
             .last_screen_report_ms
@@ -475,6 +539,7 @@ impl Store {
                     let previous = agent.status;
                     agent.status = next;
                     agent.status_since_ms = observation.observed_at_ms;
+                    self.changes.activities = true;
                     self.data.activities.push(Activity {
                         agent_id: agent.identity.agent_id.clone(),
                         at_ms: observation.observed_at_ms,
@@ -493,6 +558,7 @@ impl Store {
             agent.idle_confirmations = 0;
         }
         self.data.revision += 1;
+        self.changes.metadata = true;
         Ok(ApplyResult::Applied)
     }
 
@@ -502,13 +568,22 @@ impl Store {
             return;
         }
         for agent in self.data.agents.values_mut() {
-            agent.liveness = if !agent.ended && found.iter().any(|p| p.identity == agent.identity) {
+            let next = if !agent.ended && found.iter().any(|p| p.identity == agent.identity) {
                 Liveness::Live
             } else {
                 Liveness::Gone
             };
+            if agent.liveness != next {
+                agent.liveness = next;
+                self.changes.agents.insert(agent.identity.agent_id.clone());
+            }
         }
         for process in found {
+            if !self.data.agents.contains_key(&process.identity.agent_id) {
+                self.changes
+                    .agents
+                    .insert(process.identity.agent_id.clone());
+            }
             self.data
                 .agents
                 .entry(process.identity.agent_id.clone())
@@ -541,12 +616,25 @@ impl Store {
                 });
         }
         // Retain a short history without letting ended processes accumulate forever.
-        self.data.agents.retain(|_, a| {
-            a.liveness == Liveness::Live
-                || now_ms.saturating_sub(a.last_report_ms.unwrap_or(a.status_since_ms)) < 86_400_000
-        });
+        let removed: Vec<_> = self
+            .data
+            .agents
+            .iter()
+            .filter(|(_, a)| {
+                a.liveness != Liveness::Live
+                    && now_ms.saturating_sub(a.last_report_ms.unwrap_or(a.status_since_ms))
+                        >= 86_400_000
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in removed {
+            self.data.agents.remove(&id);
+            self.changes.agents.remove(&id);
+            self.changes.removed_agents.insert(id);
+        }
         self.data.last_scan_ms = now_ms;
         self.data.revision += 1;
+        self.changes.metadata = true;
     }
 
     /// Pane observations describe reachability, never the agent's work status.
@@ -564,7 +652,9 @@ impl Store {
             return false;
         }
         agent.pane = pane;
+        self.changes.agents.insert(identity.agent_id.clone());
         self.data.revision += 1;
+        self.changes.metadata = true;
         true
     }
 
@@ -604,7 +694,9 @@ impl Store {
         }
         if agent.pinned != pinned {
             agent.pinned = pinned;
+            self.changes.agents.insert(id.into());
             self.data.revision += 1;
+            self.changes.metadata = true;
         }
         Ok(())
     }

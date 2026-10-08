@@ -28,9 +28,11 @@ impl Store {
     pub fn close_confirmed(&mut self, target: &Identity) -> Result<(), String> {
         self.validate_close(target)?;
         let agent = self.data.agents.get_mut(&target.agent_id).unwrap();
+        self.changes.agents.insert(target.agent_id.clone());
         agent.ended = true;
         agent.liveness = Liveness::Gone;
         self.data.revision += 1;
+        self.changes.metadata = true;
         Ok(())
     }
 
@@ -42,8 +44,10 @@ impl Store {
         let alias = alias.trim();
         let agent = self.data.agents.get_mut(&target.agent_id).unwrap();
         if agent.alias != alias {
+            self.changes.agents.insert(target.agent_id.clone());
             agent.alias = alias.into();
             self.data.revision += 1;
+            self.changes.metadata = true;
         }
         Ok(())
     }
@@ -69,8 +73,10 @@ impl Store {
         if self.launches.contains_key(id) {
             return Err("launch already recorded".into());
         }
+        self.changes.launches.insert(id.into());
         self.data.launches.insert(id.into(), launch);
         self.data.revision += 1;
+        self.changes.metadata = true;
         Ok(())
     }
 
@@ -84,8 +90,10 @@ impl Store {
             return Err("launch pane changed".into());
         }
         if launch.pane_id != Some(pane) {
+            self.changes.launches.insert(id.into());
             launch.pane_id = Some(pane);
             self.data.revision += 1;
+            self.changes.metadata = true;
         }
         Ok(())
     }
@@ -117,11 +125,14 @@ impl Store {
         {
             return false;
         }
+        self.changes.launches.insert(id.into());
+        self.changes.agents.insert(target.agent_id.clone());
         launch.pane_id = Some(target.pane_id);
         launch.agent_id = Some(target.agent_id.clone());
         agent.parent_id.clone_from(&launch.parent_id);
         agent.cwd.clone_from(&launch.cwd);
         self.data.revision += 1;
+        self.changes.metadata = true;
         true
     }
 
@@ -135,8 +146,10 @@ impl Store {
 
     pub fn record_request_path(&mut self, id: &str, path: String) -> Result<(), String> {
         self.pending_request(id)?;
+        self.changes.requests.insert(id.into());
         self.data.requests.get_mut(id).unwrap().path = path;
         self.data.revision += 1;
+        self.changes.metadata = true;
         Ok(())
     }
 
@@ -152,6 +165,7 @@ impl Store {
         if state == RequestState::Pending {
             return Err("completion must be terminal".into());
         }
+        self.changes.requests.insert(id.into());
         let record = self.data.requests.get_mut(id).unwrap();
         record.state = state;
         record.message = message;
@@ -161,6 +175,7 @@ impl Store {
         }
         let response = record.clone();
         self.data.revision += 1;
+        self.changes.metadata = true;
         Ok(response)
     }
 
@@ -173,6 +188,7 @@ impl Store {
         {
             return false;
         }
+        self.changes.metadata = true;
         self.data.scan_lease = Some(ScanLease {
             token: token.into(),
             expires_at_ms: at.saturating_add(10_000),
@@ -194,6 +210,7 @@ impl Store {
         {
             return false;
         }
+        self.changes.metadata = true;
         self.data.scan_lease = None;
         true
     }
@@ -229,8 +246,10 @@ impl Store {
             return false;
         }
         if agent.last_screen_attempt_ms != at {
+            self.changes.agents.insert(target.agent_id.clone());
             agent.last_screen_attempt_ms = at;
             self.data.revision += 1;
+            self.changes.metadata = true;
         }
         true
     }
@@ -278,6 +297,25 @@ mod tests {
         assert!(store.validate_close(&target).is_err());
         assert!(store.close_confirmed(&target).is_err());
         store.set_pinned(&target.agent_id, false).unwrap();
+        let mut parent = store.agents[&target.agent_id].clone();
+        parent.identity.agent_id = "parent".into();
+        parent.pinned = true;
+        store.data.agents.insert("parent".into(), parent);
+        store
+            .data
+            .agents
+            .get_mut(&target.agent_id)
+            .unwrap()
+            .parent_id = Some("parent".into());
+        let request = crate::ActionRequest {
+            request_id: "close".into(),
+            action: crate::Action::Close {
+                target: target.clone(),
+            },
+        };
+        assert!(store.claim(&request, 5001).is_err());
+        assert!(store.close_confirmed(&target).is_err());
+        store.set_pinned("parent", false).unwrap();
         store.close_confirmed(&target).unwrap();
         assert!(store.agents[&target.agent_id].ended);
         assert_eq!(store.agents[&target.agent_id].liveness, Liveness::Gone);

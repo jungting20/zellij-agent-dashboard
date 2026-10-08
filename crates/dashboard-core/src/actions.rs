@@ -129,7 +129,7 @@ impl Store {
             }
             return Ok(false);
         }
-        if self.data.requests.len() >= 4096 {
+        if self.request_count() >= 4096 {
             return Err("request history full; archive the state after closing dashboards".into());
         }
         if let Some(target) = request.action.target() {
@@ -137,6 +137,10 @@ impl Store {
         }
         if let Action::Close { target } = &request.action {
             self.validate_close(target)?;
+        }
+        self.changes.requests.insert(request.request_id.clone());
+        if let Some(total) = &mut self.request_total {
+            *total += 1;
         }
         self.data.requests.insert(
             request.request_id.clone(),
@@ -150,16 +154,26 @@ impl Store {
             },
         );
         self.data.revision += 1;
+        self.changes.metadata = true;
         Ok(true)
     }
 
     pub fn remember_directory(&mut self, cwd: &str) {
-        if cwd.is_empty() {
+        if cwd.is_empty()
+            || self
+                .data
+                .recent_directories
+                .first()
+                .is_some_and(|value| value == cwd)
+        {
             return;
         }
         self.data.recent_directories.retain(|p| p != cwd);
         self.data.recent_directories.insert(0, cwd.into());
         self.data.recent_directories.truncate(100);
+        self.changes.recent_directories = true;
+        self.changes.metadata = true;
+        self.data.revision += 1;
     }
 }
 

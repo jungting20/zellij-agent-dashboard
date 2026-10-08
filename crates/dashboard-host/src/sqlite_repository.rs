@@ -1,10 +1,9 @@
 //! Native SQLite adapter. SQL and filesystem details never enter the core.
-use crate::repository::{CatalogState, Repository, TransactionBackend, UnitOfWork};
+use crate::repository::{CatalogState, Repository, TransactionBackend, UnitOfWork, WriteScope};
 use dashboard_core::{ActionResult, Agent, Snapshot, Store, StoreData};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
-    collections::BTreeMap,
     fs::{self, OpenOptions},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::PathBuf,
@@ -56,7 +55,7 @@ impl SqliteRepository {
                     return Ok(());
                 }
                 if current == 1 {
-                    Store::restore(header(&conn)?)?;
+                    Store::loaded(header(&conn)?, None)?;
                     conn.execute_batch(
                         "ALTER TABLE requests ADD COLUMN at_ms INTEGER NOT NULL DEFAULT 0;",
                     )
@@ -96,7 +95,7 @@ impl SqliteRepository {
                      CREATE TABLE launches (id TEXT PRIMARY KEY, body TEXT NOT NULL);
                      CREATE TABLE recent_directories (id INTEGER PRIMARY KEY, body TEXT NOT NULL);"
                 ).map_err(error)?;
-                persist(&conn, &Store::default(), &store)?;
+                persist_full(&conn, &store)?;
                 conn.pragma_update(None, "user_version", DATABASE_VERSION)
                     .map_err(error)?;
                 Ok(())
@@ -111,6 +110,47 @@ impl SqliteRepository {
         }
         Ok(conn)
     }
+    fn begin_scope(&self, scope: WriteScope) -> Result<UnitOfWork, String> {
+        let conn = self.connect()?;
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(error)?;
+        let store = match &scope {
+            WriteScope::Full => load(&conn)?,
+            WriteScope::Runtime => load_runtime(&conn, true)?,
+            WriteScope::Action(id) => {
+                let mut data = runtime_data(&conn, true)?;
+                if let Some(request) = record(&conn, "requests", id)? {
+                    data.requests.insert(id.clone(), request);
+                }
+                let count: i64 = conn
+                    .query_row("SELECT count(*) FROM requests", [], |row| row.get(0))
+                    .map_err(error)?;
+                Store::loaded(data, Some(usize::try_from(count).map_err(error)?))?
+            }
+            WriteScope::Request(id) => {
+                let mut data = header(&conn)?;
+                if let Some(request) = record(&conn, "requests", id)? {
+                    data.requests.insert(id.clone(), request);
+                }
+                if let Some(launch) = record(&conn, "launches", id)? {
+                    data.launches.insert(id.clone(), launch);
+                }
+                data.recent_directories = records(&conn, "recent_directories")?
+                    .into_iter()
+                    .map(|(_, value)| value)
+                    .collect();
+                // Preserve migration changes for agent defaults even in a request transaction.
+                if data.schema_version < dashboard_core::SCHEMA_VERSION {
+                    data.agents = records(&conn, "agents")?.into_iter().collect();
+                }
+                Store::loaded(data, None)?
+            }
+        };
+        Ok(UnitOfWork::new(
+            store,
+            Box::new(SqliteTransaction { conn, scope }),
+        ))
+    }
+
     fn query<T>(&self, read: impl FnOnce(&Connection) -> Result<T, String>) -> Result<T, String> {
         let conn = self.connect()?;
         let tx = conn.unchecked_transaction().map_err(error)?;
@@ -164,18 +204,18 @@ impl Repository for SqliteRepository {
             if let Some(agent) = record::<Agent>(conn, "agents", id)? {
                 data.agents.insert(id.into(), agent);
             }
-            Ok(Store::restore(data)?.agents.get(id).cloned())
+            Ok(Store::loaded(data, None)?.agents.get(id).cloned())
         })
     }
     fn request(&self, id: &str) -> Result<Option<ActionResult>, String> {
         self.query(|conn| {
-            Store::restore(header(conn)?)?;
+            Store::loaded(header(conn)?, None)?;
             record(conn, "requests", id)
         })
     }
     fn recent_requests(&self, limit: usize) -> Result<Vec<ActionResult>, String> {
         self.query(|conn| {
-            Store::restore(header(conn)?)?;
+            Store::loaded(header(conn)?, None)?;
             let mut query = conn
                 .prepare("SELECT body FROM requests ORDER BY at_ms DESC, id ASC LIMIT ?1")
                 .map_err(error)?;
@@ -194,7 +234,7 @@ impl Repository for SqliteRepository {
                 .into_iter()
                 .map(|(_, value)| value)
                 .collect();
-            let store = Store::restore(data)?;
+            let store = Store::loaded(data, None)?;
             Ok(CatalogState {
                 directories: store.recent_directories.clone(),
                 agents: store.agents.values().cloned().collect(),
@@ -205,27 +245,32 @@ impl Repository for SqliteRepository {
         self.query(|conn| load_runtime(conn, true))
     }
     fn begin(&self) -> Result<UnitOfWork, String> {
-        let conn = self.connect()?;
-        conn.execute_batch("BEGIN IMMEDIATE").map_err(error)?;
-        let previous = load(&conn)?;
-        Ok(UnitOfWork::new(
-            previous.clone(),
-            Box::new(SqliteTransaction { conn, previous }),
-        ))
+        self.begin_scope(WriteScope::Full)
+    }
+    fn begin_runtime(&self) -> Result<UnitOfWork, String> {
+        self.begin_scope(WriteScope::Runtime)
+    }
+    fn begin_action(&self, id: &str) -> Result<UnitOfWork, String> {
+        self.begin_scope(WriteScope::Action(id.into()))
+    }
+    fn begin_request(&self, id: &str) -> Result<UnitOfWork, String> {
+        self.begin_scope(WriteScope::Request(id.into()))
     }
 }
 
 struct SqliteTransaction {
     conn: Connection,
-    previous: Store,
+    scope: WriteScope,
 }
 
 impl TransactionBackend for SqliteTransaction {
     fn commit(&mut self, store: &Store) -> Result<(), String> {
-        // Reject a newer domain schema rather than saving unreadable data.
-        let mut validated = store.clone();
-        validated.migrate()?;
-        persist(&self.conn, &self.previous, &validated)?;
+        store.check_version()?;
+        validate_scope(store, &self.scope)?;
+        if store.changes().replacement {
+            prune_replacement(&self.conn, store)?;
+        }
+        persist_changes(&self.conn, store)?;
         self.conn.execute_batch("COMMIT").map_err(error)
     }
 }
@@ -284,7 +329,7 @@ fn record<T: DeserializeOwned>(
         .transpose()
 }
 
-fn load_runtime(conn: &Connection, relationships: bool) -> Result<Store, String> {
+fn runtime_data(conn: &Connection, relationships: bool) -> Result<StoreData, String> {
     let mut data = header(conn)?;
     data.agents = records(conn, "agents")?.into_iter().collect();
     data.activities = records(conn, "activities")?
@@ -298,7 +343,11 @@ fn load_runtime(conn: &Connection, relationships: bool) -> Result<Store, String>
             .map(|(_, value)| value)
             .collect();
     }
-    Store::restore(data)
+    Ok(data)
+}
+
+fn load_runtime(conn: &Connection, relationships: bool) -> Result<Store, String> {
+    Store::loaded(runtime_data(conn, relationships)?, None)
 }
 
 fn load(conn: &Connection) -> Result<Store, String> {
@@ -314,106 +363,122 @@ fn load(conn: &Connection) -> Result<Store, String> {
         .into_iter()
         .map(|(_, v)| v)
         .collect();
-    Store::restore(store)
+    Store::loaded(store, None)
 }
 
 fn metadata(store: &Store) -> Result<String, String> {
-    let mut value = store.clone().into_data();
-    value.agents.clear();
-    value.activities.clear();
-    value.requests.clear();
-    value.launches.clear();
-    value.recent_directories.clear();
-    serde_json::to_string(&value).map_err(error)
+    serde_json::to_string(&store.metadata()).map_err(error)
 }
 
-fn encoded<T: Serialize>(
-    values: impl IntoIterator<Item = (String, T)>,
-) -> Result<BTreeMap<String, String>, String> {
-    values
-        .into_iter()
-        .map(|(id, v)| Ok((id, serde_json::to_string(&v).map_err(error)?)))
-        .collect()
-}
-
-fn sync(
-    conn: &Connection,
-    table: &str,
-    old: BTreeMap<String, String>,
-    new: BTreeMap<String, String>,
-) -> Result<(), String> {
-    let mut delete = conn
-        .prepare(&format!("DELETE FROM {table} WHERE id=?1"))
-        .map_err(error)?;
-    for id in old.keys().filter(|id| !new.contains_key(*id)) {
-        delete.execute([id]).map_err(error)?;
+fn validate_scope(store: &Store, scope: &WriteScope) -> Result<(), String> {
+    let changes = store.changes();
+    if changes.replacement && !matches!(scope, WriteScope::Full) {
+        return Err("full restoration requires a full transaction".into());
     }
-    for (id, body) in new {
-        if old.get(&id) != Some(&body) {
-            if table == "requests" {
-                let record: ActionResult = serde_json::from_str(&body).map_err(error)?;
-                conn.execute("INSERT INTO requests(id, body, at_ms) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET body=excluded.body, at_ms=excluded.at_ms", params![id, body, i64::try_from(record.at_ms).map_err(error)?]).map_err(error)?;
-            } else {
-                conn.execute(&format!("INSERT INTO {table} (id, body) VALUES (?1, ?2) ON CONFLICT(id) DO UPDATE SET body=excluded.body"), params![id, body]).map_err(error)?;
-            }
+    match scope {
+        WriteScope::Full => Ok(()),
+        WriteScope::Runtime if changes.requests.is_empty() => Ok(()),
+        WriteScope::Action(id) | WriteScope::Request(id)
+            if changes.requests.iter().all(|key| key == id) =>
+        {
+            Ok(())
+        }
+        _ => Err("request mutation outside transaction scope".into()),
+    }
+}
+
+fn prune_replacement(conn: &Connection, store: &Store) -> Result<(), String> {
+    // Explicit full restoration only. Partial scopes never infer deletions.
+    for (table, ids) in [
+        (
+            "agents",
+            store
+                .agents
+                .keys()
+                .collect::<std::collections::BTreeSet<_>>(),
+        ),
+        ("requests", store.requests.keys().collect()),
+        ("launches", store.launches.keys().collect()),
+    ] {
+        let mut query = conn
+            .prepare(&format!("SELECT id FROM {table}"))
+            .map_err(error)?;
+        let existing = query
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(error)?;
+        let remove: Vec<_> = existing
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)?
+            .into_iter()
+            .filter(|id| !ids.contains(id))
+            .collect();
+        for id in remove {
+            conn.execute(&format!("DELETE FROM {table} WHERE id=?1"), [id])
+                .map_err(error)?;
         }
     }
     Ok(())
 }
 
-fn persist(conn: &Connection, old: &Store, new: &Store) -> Result<(), String> {
-    conn.execute("INSERT INTO metadata (id, body) VALUES ('store', ?1) ON CONFLICT(id) DO UPDATE SET body=excluded.body", [metadata(new)?]).map_err(error)?;
-    sync(
-        conn,
-        "agents",
-        encoded(old.agents.iter().map(|(k, v)| (k.clone(), v)))?,
-        encoded(new.agents.iter().map(|(k, v)| (k.clone(), v)))?,
-    )?;
-    sync(
-        conn,
-        "requests",
-        encoded(old.requests.iter().map(|(k, v)| (k.clone(), v)))?,
-        encoded(new.requests.iter().map(|(k, v)| (k.clone(), v)))?,
-    )?;
-    sync(
-        conn,
-        "launches",
-        encoded(old.launches.iter().map(|(k, v)| (k.clone(), v)))?,
-        encoded(new.launches.iter().map(|(k, v)| (k.clone(), v)))?,
-    )?;
-    sync(
-        conn,
-        "activities",
-        encoded(
-            old.activities
-                .iter()
-                .enumerate()
-                .map(|(k, v)| (k.to_string(), v)),
-        )?,
-        encoded(
-            new.activities
-                .iter()
-                .enumerate()
-                .map(|(k, v)| (k.to_string(), v)),
-        )?,
-    )?;
-    sync(
-        conn,
-        "recent_directories",
-        encoded(
-            old.recent_directories
-                .iter()
-                .enumerate()
-                .map(|(k, v)| (k.to_string(), v)),
-        )?,
-        encoded(
-            new.recent_directories
-                .iter()
-                .enumerate()
-                .map(|(k, v)| (k.to_string(), v)),
-        )?,
-    )?;
+fn upsert<T: Serialize>(conn: &Connection, table: &str, id: &str, value: &T) -> Result<(), String> {
+    let body = serde_json::to_string(value).map_err(error)?;
+    conn.execute(&format!("INSERT INTO {table}(id, body) VALUES (?1, ?2) ON CONFLICT(id) DO UPDATE SET body=excluded.body WHERE body<>excluded.body"), params![id, body]).map_err(error)?;
     Ok(())
+}
+
+fn replace_list<T: Serialize>(conn: &Connection, table: &str, values: &[T]) -> Result<(), String> {
+    // Activity and directory lists are bounded to 50 and 100 records respectively.
+    conn.execute(&format!("DELETE FROM {table}"), [])
+        .map_err(error)?;
+    for (index, value) in values.iter().enumerate() {
+        upsert(conn, table, &index.to_string(), value)?;
+    }
+    Ok(())
+}
+
+fn persist_changes(conn: &Connection, store: &Store) -> Result<(), String> {
+    let changes = store.changes();
+    if changes.metadata {
+        conn.execute("INSERT INTO metadata(id, body) VALUES ('store', ?1) ON CONFLICT(id) DO UPDATE SET body=excluded.body WHERE body<>excluded.body", [metadata(store)?]).map_err(error)?;
+    }
+    for id in &changes.removed_agents {
+        conn.execute("DELETE FROM agents WHERE id=?1", [id])
+            .map_err(error)?;
+    }
+    for id in &changes.agents {
+        upsert(
+            conn,
+            "agents",
+            id,
+            store.agents.get(id).ok_or("changed agent missing")?,
+        )?;
+    }
+    for id in &changes.launches {
+        upsert(
+            conn,
+            "launches",
+            id,
+            store.launches.get(id).ok_or("changed launch missing")?,
+        )?;
+    }
+    for id in &changes.requests {
+        let record = store.requests.get(id).ok_or("changed request missing")?;
+        let body = serde_json::to_string(record).map_err(error)?;
+        conn.execute("INSERT INTO requests(id, body, at_ms) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET body=excluded.body, at_ms=excluded.at_ms WHERE body<>excluded.body OR at_ms<>excluded.at_ms", params![id, body, i64::try_from(record.at_ms).map_err(error)?]).map_err(error)?;
+    }
+    if changes.activities {
+        replace_list(conn, "activities", &store.activities)?;
+    }
+    if changes.recent_directories {
+        replace_list(conn, "recent_directories", &store.recent_directories)?;
+    }
+    Ok(())
+}
+
+fn persist_full(conn: &Connection, store: &Store) -> Result<(), String> {
+    let restored = Store::restore(store.clone().into_data())?;
+    prune_replacement(conn, &restored)?;
+    persist_changes(conn, &restored)
 }
 
 #[cfg(test)]
@@ -568,13 +633,11 @@ mod tests {
     #[test]
     fn legacy_v1_import_restores_hook_source() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = fixture();
-        crate::repository::edit_fixture(&mut store, |data| {
-            data.schema_version = 1;
-            let agent = data.agents.values_mut().next().unwrap();
-            agent.sequence = 7;
-            agent.last_report_ms = Some(123);
-        });
+        let mut store = fixture().into_data();
+        store.schema_version = 1;
+        let agent = store.agents.values_mut().next().unwrap();
+        agent.sequence = 7;
+        agent.last_report_ms = Some(123);
         fs::write(
             dir.path().join("store.json"),
             serde_json::to_vec(&store).unwrap(),
@@ -851,5 +914,279 @@ mod tests {
             .collect();
         assert_eq!(ids, ["b", "c"]);
         assert!(repo.request("missing").unwrap().is_none());
+    }
+    fn launch_request(id: &str) -> ActionRequest {
+        ActionRequest {
+            request_id: id.into(),
+            action: Action::Launch {
+                session: "dev".into(),
+                epoch: "epoch".into(),
+                cwd: "/tmp".into(),
+                tool: "codex".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn scoped_changes_skip_unrelated_payloads_preserve_rows_and_limit_mutations() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = SqliteRepository(dir.path().into());
+        let mut tx = repo.begin().unwrap();
+        tx.store = fixture();
+        tx.commit().unwrap();
+        let conn = repo.connect().unwrap();
+        conn.execute("INSERT INTO requests VALUES ('unrelated', '{bad', 0)", [])
+            .unwrap();
+        conn.execute_batch("CREATE TRIGGER preserve_unrelated BEFORE UPDATE ON requests WHEN OLD.id='unrelated' BEGIN SELECT RAISE(ABORT, 'unrelated request changed'); END;").unwrap();
+        let id = repo.snapshot(10000).unwrap().agents[0]
+            .identity
+            .agent_id
+            .clone();
+        let target = repo.agent(&id).unwrap().unwrap().identity;
+        let mut tx = repo.begin_runtime().unwrap();
+        assert!(tx.store.requests.is_empty());
+        tx.store.set_alias(&target, "갱신").unwrap();
+        tx.commit().unwrap();
+        assert_eq!(repo.agent(&id).unwrap().unwrap().alias, "갱신");
+        // A request-only transaction has no runtime agents or activities.
+        conn.execute_batch("CREATE TRIGGER preserve_agents BEFORE UPDATE ON agents BEGIN SELECT RAISE(ABORT, 'agent rewritten by request'); END;").unwrap();
+        let mut tx = repo.begin_request("pending").unwrap();
+        assert!(tx.store.agents.is_empty());
+        assert_eq!(tx.store.requests.len(), 1);
+        tx.store
+            .finish_request(
+                "pending",
+                dashboard_core::RequestState::Succeeded,
+                "ok".into(),
+                Some(8),
+                None,
+            )
+            .unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            repo.request("pending").unwrap().unwrap().state,
+            dashboard_core::RequestState::Succeeded
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT body FROM requests WHERE id='unrelated'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "{bad"
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM requests", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        // Full replacement and out-of-scope claims are rejected rather than deleting omitted data.
+        let mut tx = repo.begin_request("pending").unwrap();
+        tx.store = Store::restore(StoreData::default()).unwrap();
+        assert!(tx.commit().is_err());
+        drop(tx);
+        let mut tx = repo.begin_runtime().unwrap();
+        tx.store
+            .claim(&launch_request("wrong-scope"), 20000)
+            .unwrap();
+        assert!(tx.commit().is_err());
+        drop(tx);
+        assert!(repo.request("wrong-scope").unwrap().is_none());
+        assert!(repo.agent(&id).unwrap().is_some());
+    }
+
+    #[test]
+    fn action_scope_checks_global_limit_and_concurrent_claims_execute_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = SqliteRepository(dir.path().into());
+        let conn = repo.connect().unwrap();
+        let mut record = dashboard_core::ActionResult {
+            request: launch_request("seed"),
+            state: dashboard_core::RequestState::Succeeded,
+            at_ms: 1,
+            message: "ok".into(),
+            pane_id: None,
+            path: String::new(),
+        };
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        for index in 0..4096 {
+            record.request.request_id = format!("seed-{index}");
+            conn.execute(
+                "INSERT INTO requests VALUES (?1, ?2, ?3)",
+                params![
+                    record.request.request_id,
+                    serde_json::to_string(&record).unwrap(),
+                    1
+                ],
+            )
+            .unwrap();
+        }
+        conn.execute_batch("COMMIT").unwrap();
+        let mut tx = repo.begin_action("new").unwrap();
+        assert!(tx.store.requests.is_empty());
+        assert_eq!(tx.store.request_count(), 4096);
+        assert!(tx.store.claim(&launch_request("new"), 20000).is_err());
+        drop(tx);
+        let mut tx = repo.begin_action("seed-0").unwrap();
+        assert!(!tx.store.claim(&launch_request("seed-0"), 20000).unwrap());
+        drop(tx);
+        conn.execute("DELETE FROM requests", []).unwrap();
+        let barrier = Arc::new(Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let dir = dir.path().to_owned();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let repo = SqliteRepository(dir);
+                    let mut tx = repo.begin_action("once").unwrap();
+                    let claimed = tx.store.claim(&launch_request("once"), 20000).unwrap();
+                    tx.commit().unwrap();
+                    claimed
+                })
+            })
+            .collect();
+        assert_eq!(
+            threads
+                .into_iter()
+                .map(|thread| thread.join().unwrap() as usize)
+                .sum::<usize>(),
+            1
+        );
+        assert_eq!(repo.recent_requests(50).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn scoped_migration_and_explicit_agent_deletion_preserve_request_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = SqliteRepository(dir.path().into());
+        let mut tx = repo.begin().unwrap();
+        tx.store = fixture();
+        tx.commit().unwrap();
+        let conn = repo.connect().unwrap();
+        let id = repo.snapshot(10000).unwrap().agents[0]
+            .identity
+            .agent_id
+            .clone();
+        for request_only in [false, true] {
+            let mut data = repo.read().unwrap().into_data();
+            data.schema_version = 2;
+            data.agents.get_mut(&id).unwrap().pane.presence = dashboard_core::PanePresence::Present;
+            data.agents.get_mut(&id).unwrap().pane.observed_at_ms = 123;
+            let agent = serde_json::to_string(&data.agents[&id]).unwrap();
+            let mut header = Store::loaded(data.clone(), None).unwrap().metadata();
+            header.schema_version = 2;
+            conn.execute(
+                "UPDATE metadata SET body=?1",
+                [serde_json::to_string(&header).unwrap()],
+            )
+            .unwrap();
+            conn.execute("UPDATE agents SET body=?1 WHERE id=?2", params![agent, id])
+                .unwrap();
+            let mut tx = if request_only {
+                repo.begin_request("pending").unwrap()
+            } else {
+                repo.begin_action("other").unwrap()
+            };
+            tx.commit().unwrap();
+            let persisted: Agent = serde_json::from_str(
+                &conn
+                    .query_row("SELECT body FROM agents WHERE id=?1", [&id], |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                persisted.pane.presence,
+                dashboard_core::PanePresence::Unknown
+            );
+            assert_eq!(persisted.pane.observed_at_ms, 0);
+        }
+        let mut tx = repo.begin_runtime().unwrap();
+        tx.store.reconcile(&[], 100_000_000);
+        tx.commit().unwrap();
+        assert!(repo.agent(&id).unwrap().is_none());
+        assert!(repo.request("pending").unwrap().is_some());
+    }
+
+    #[test]
+    fn failed_request_patch_rolls_back_metadata_and_preserves_pending_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = SqliteRepository(dir.path().into());
+        let mut tx = repo.begin_action("pending").unwrap();
+        tx.store.claim(&launch_request("pending"), 10).unwrap();
+        tx.commit().unwrap();
+        let revision = repo.snapshot(10).unwrap().revision;
+        let conn = repo.connect().unwrap();
+        conn.execute_batch("CREATE TRIGGER fail_completion BEFORE UPDATE ON requests BEGIN SELECT RAISE(ABORT, 'forced completion failure'); END;").unwrap();
+        let mut tx = repo.begin_request("pending").unwrap();
+        tx.store
+            .finish_request(
+                "pending",
+                dashboard_core::RequestState::Succeeded,
+                "ok".into(),
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(tx.commit().is_err());
+        drop(tx);
+        assert_eq!(repo.snapshot(10).unwrap().revision, revision);
+        assert_eq!(
+            repo.request("pending").unwrap().unwrap().state,
+            dashboard_core::RequestState::Pending
+        );
+    }
+
+    #[test]
+    #[ignore = "manual repository timing experiment; no timing assertions"]
+    fn repository_transaction_cost_with_request_history() {
+        for count in [0, 4000] {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = SqliteRepository(dir.path().into());
+            let conn = repo.connect().unwrap();
+            let mut record = dashboard_core::ActionResult {
+                request: launch_request("seed"),
+                state: dashboard_core::RequestState::Succeeded,
+                at_ms: 1,
+                message: "x".repeat(4096),
+                pane_id: None,
+                path: String::new(),
+            };
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            for index in 0..count {
+                record.request.request_id = format!("seed-{index}");
+                conn.execute(
+                    "INSERT INTO requests VALUES (?1, ?2, 1)",
+                    params![
+                        record.request.request_id,
+                        serde_json::to_string(&record).unwrap()
+                    ],
+                )
+                .unwrap();
+            }
+            conn.execute_batch("COMMIT").unwrap();
+            for (name, scope) in [("full", WriteScope::Full), ("runtime", WriteScope::Runtime)] {
+                let mut samples = Vec::new();
+                for index in 0..12 {
+                    let start = Instant::now();
+                    let mut tx = repo.begin_scope(scope.clone()).unwrap();
+                    assert!(tx.store.claim_scan(&format!("sample-{index}"), 20000));
+                    tx.commit().unwrap();
+                    let mut release = repo.begin_scope(scope.clone()).unwrap();
+                    release.store.release_scan(&format!("sample-{index}"));
+                    release.commit().unwrap();
+                    samples.push(start.elapsed().as_secs_f64() * 1000.0);
+                }
+                samples.sort_by(f64::total_cmp);
+                println!(
+                    "requests={count} scope={name} claim+release median_ms={:.3}",
+                    (samples[5] + samples[6]) / 2.0
+                );
+            }
+        }
     }
 }

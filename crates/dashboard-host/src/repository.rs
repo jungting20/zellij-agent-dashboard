@@ -2,6 +2,14 @@
 use dashboard_core::{ActionResult, Agent, Snapshot, Store};
 use std::path::Path;
 
+#[derive(Clone, Debug)]
+pub enum WriteScope {
+    Full,
+    Runtime,
+    Action(String),
+    Request(String),
+}
+
 pub struct CatalogState {
     pub directories: Vec<String>,
     pub agents: Vec<Agent>,
@@ -38,6 +46,15 @@ pub trait Repository {
     }
     /// Serialize read-modify-write operations until commit or drop.
     fn begin(&self) -> Result<UnitOfWork, String>;
+    fn begin_runtime(&self) -> Result<UnitOfWork, String> {
+        self.begin()
+    }
+    fn begin_action(&self, _id: &str) -> Result<UnitOfWork, String> {
+        self.begin()
+    }
+    fn begin_request(&self, _id: &str) -> Result<UnitOfWork, String> {
+        self.begin()
+    }
 }
 
 pub trait TransactionBackend {
@@ -86,7 +103,7 @@ pub fn now_ms() -> u64 {
 pub fn edit_fixture(store: &mut Store, edit: impl FnOnce(&mut dashboard_core::StoreData)) {
     let mut data = store.clone().into_data();
     edit(&mut data);
-    *store = serde_json::from_value(serde_json::to_value(data).unwrap()).unwrap();
+    *store = Store::restore(data).unwrap();
 }
 
 #[cfg(test)]

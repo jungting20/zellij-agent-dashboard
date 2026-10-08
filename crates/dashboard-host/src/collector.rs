@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 pub fn scan(deps: &HostDependencies) -> Result<Snapshot, String> {
     let token = uuid::Uuid::new_v4().to_string();
     {
-        let mut locked = deps.repository.begin()?;
+        let mut locked = deps.repository.begin_runtime()?;
         let at = now_ms();
         if !locked.store.claim_scan(&token, at) {
             return Ok(locked.store.snapshot(at));
@@ -24,7 +24,7 @@ pub fn scan(deps: &HostDependencies) -> Result<Snapshot, String> {
     }
     let result = collect(deps, &token);
     // Release on success or failure; never release a newer helper's claim.
-    let mut locked = deps.repository.begin()?;
+    let mut locked = deps.repository.begin_runtime()?;
     if locked.store.release_scan(&token) {
         locked.commit()?;
     }
@@ -41,7 +41,7 @@ fn collect(deps: &HostDependencies, token: &str) -> Result<(), String> {
     let inventory_at = now_ms();
     let inventory = process::inventory(deps.runner)?;
     let mut collected = {
-        let mut locked = deps.repository.begin()?;
+        let mut locked = deps.repository.begin_runtime()?;
         if !owns_claim(&locked, token) || inventory_at < locked.store.last_scan_ms {
             return Ok(());
         }
@@ -112,7 +112,7 @@ fn collect(deps: &HostDependencies, token: &str) -> Result<(), String> {
     }
     let verified_at = now_ms();
     let verified = process::inventory(deps.runner)?;
-    let mut locked = deps.repository.begin()?;
+    let mut locked = deps.repository.begin_runtime()?;
     if !owns_claim(&locked, token) || verified_at < locked.store.last_scan_ms {
         return Ok(());
     }

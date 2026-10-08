@@ -97,7 +97,7 @@ fn checked(target: &Identity, deps: &HostDependencies) -> Result<Agent, String> 
     let pane = panes::require_present(target, deps)?;
     let inventory_at = now_ms();
     let inventory = process::inventory(deps.runner)?;
-    let mut locked = deps.repository.begin()?;
+    let mut locked = deps.repository.begin_runtime()?;
     locked.store.reconcile(&inventory.found, inventory_at);
     link_launches(&mut locked.store, &inventory);
     locked.store.validate_target(target)?;
@@ -174,7 +174,7 @@ fn launch(
     }
     let directory = path.to_string_lossy().to_string();
     {
-        let mut locked = deps.repository.begin()?;
+        let mut locked = deps.repository.begin_request(&request.request_id)?;
         locked.store.record_launch(
             &request.request_id,
             LaunchInfo {
@@ -205,7 +205,7 @@ fn launch(
             args: vec![marker.into(), exe.into_os_string()],
         },
     )?)?;
-    let mut locked = deps.repository.begin()?;
+    let mut locked = deps.repository.begin_request(&request.request_id)?;
     locked.store.record_launch_pane(&request.request_id, pane)?;
     locked.store.remember_directory(&directory);
     locked.commit()?;
@@ -229,7 +229,7 @@ fn send(target: &Identity, text: &str, deps: &HostDependencies) -> Result<(), St
     deps.terminal.write_text(&session, &pane, &paste)?;
     checked(target, deps)?;
     deps.terminal.write_bytes(&session, &pane, &[13])?;
-    let mut locked = deps.repository.begin()?;
+    let mut locked = deps.repository.begin_runtime()?;
     let at = now_ms();
     locked.store.validate_target(target)?;
     locked.store.apply_signal(&StateSignal::Instruction {
@@ -252,7 +252,7 @@ fn execute(
         }
         Action::Alias { target, alias } => {
             checked(target, deps)?;
-            let mut locked = deps.repository.begin()?;
+            let mut locked = deps.repository.begin_runtime()?;
             locked.store.set_alias(target, alias)?;
             locked.commit()?;
             Ok(("태그 저장 완료".into(), None, String::new()))
@@ -260,7 +260,7 @@ fn execute(
         Action::Close { target } => {
             checked(target, deps)?;
             // Serialize pin settings through the final protection check/close.
-            let mut locked = deps.repository.begin()?;
+            let mut locked = deps.repository.begin_runtime()?;
             locked.store.validate_close(target)?;
             deps.terminal.close_pane(
                 &SessionId(target.session_name.clone()),
@@ -319,7 +319,7 @@ fn execute(
                     root.file_name().unwrap_or_default().to_string_lossy(),
                     name
                 ));
-            let mut locked = deps.repository.begin()?;
+            let mut locked = deps.repository.begin_request(&request.request_id)?;
             locked
                 .store
                 .record_request_path(&request.request_id, path.to_string_lossy().into())?;
@@ -465,7 +465,7 @@ pub fn action(
     {
         let inventory_at = now_ms();
         let inventory = process::inventory(deps.runner)?;
-        let mut locked = deps.repository.begin()?;
+        let mut locked = deps.repository.begin_action(&request.request_id)?;
         locked.store.reconcile(&inventory.found, inventory_at);
         link_launches(&mut locked.store, &inventory);
         if !locked.store.claim(&request, now_ms())? {
@@ -474,7 +474,7 @@ pub fn action(
         locked.commit()?;
     }
     let result = execute(dir, &request, deps);
-    let mut locked = deps.repository.begin()?;
+    let mut locked = deps.repository.begin_request(&request.request_id)?;
     let response = match result {
         Ok((message, pane, path)) => locked.store.finish_request(
             &request.request_id,

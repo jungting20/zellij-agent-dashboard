@@ -115,3 +115,17 @@ DB 구조 버전은 2이며 버전 1의 요청 JSON에서 시각을 채우고 �
 `python3 scripts/smoke.py`를 임시 세션 두 개에서 통과했다. 결과는 `.local/smoke-8891ad352e/result.json`이며 기존 수집·상태·조작·중복·이동·detach·reload 시나리오와 DB 버전 2·WAL·무결성을 확인했다. 실제 Claude 옵션은 다음 통합 검증에서 실행한다. 운영 세션에 설치·reload를 적용하지 않았다.
 
 프로세스 시작을 포함한 CLI 스냅샷 조회를 12회씩 측정했다. 에이전트 없는 상태에서 요청 0개/4,000개(각 메시지 4 KiB)의 중앙값은 이전 host 3.603/16.305ms, 조회 분리 host 3.752/4.284ms였다. 로컬 측정으로 절대 성능 보장을 의미하지 않는다. 결과는 `.local/repository-benchmark-30e95cc48d/result.json`이다.
+
+## 2026-10-08 작업별 트랜잭션과 변경분 저장
+
+코어가 변경된 agent/request/launch ID, 삭제된 agent ID와 메타데이터·활동·최근 경로 변경을 추적한다. SQLite는 이 변경분만 직렬화·저장하며 트랜잭션 시작/커밋의 전체 Store 복제와 전체 JSON 비교를 제거했다. 활동·최근 경로는 각각 최대 50개·100개인 목록 단위로 교체한다. 메타데이터는 컬렉션을 복제하지 않고 별도로 구성한다. 변경 추적과 부분 조회의 요청 총개수는 저장 JSON에 포함하지 않는다.
+
+수집·훅·대상 확인은 runtime 트랜잭션으로 요청 이력을 읽지 않는다. 요청 접수는 runtime 상태·해당 요청과 SQL 전체 개수를 읽어 4,096개 제한 및 중복을 함께 검사한다. 결과·launch 기록은 해당 요청과 launch·최근 경로를 읽는다. 도메인 이관이 필요한 요청 트랜잭션은 에이전트 기본값도 함께 이관한다. 전체 복원은 명시적인 full 트랜잭션에서만 허용하며 부분 조회의 누락을 삭제로 해석하지 않는다. 명시적으로 정리한 agent ID만 삭제한다.
+
+`./scripts/check.sh`에서 코어 27개·호스트 48개, 총 75개 테스트를 통과했으며 별도의 수동 성능 측정 테스트 1개는 기본 검사에서 제외한다. 포맷·네이티브/WASI Clippy·스크립트 구문 검사와 `./scripts/build.sh` release host/WASM 빌드도 통과했다. 검증은 부분 조회의 관련 없는 손상 payload 제외와 행 보존, 범위 밖 요청 변경·부분 트랜잭션의 전체 복원 거부, 전체 요청 한도와 기존 요청 재사용, 동시 8개 claim 중 1개만 접수, action/request 범위의 도메인 이관, 명시적 agent 삭제, 결과 저장 실패 시 메타데이터와 pending 결과 보존을 포함한다. 코어 종료 보호는 부모 고정에 대해서도 접수와 종료 직전의 동일한 거부를 확인했다.
+
+`python3 scripts/smoke.py --real-claude`를 임시 세션 두 개에서 통과했다. 결과는 `.local/smoke-04ab713396/result.json`이다. 화면 감지·훅 출처 전환·입력/종료/실행·중복 요청·고정/별칭 보존·멀티 클라이언트·이동·detach·reload·DB 버전 2·무결성과 실제 Claude SessionStart 훅을 확인했다. 모델 요청은 하지 않았고 테스트 세션과 프로세스는 정리했다. 운영 세션에 설치·reload를 적용하지 않았다.
+
+수동 실험 `cargo test -p dashboard-host repository_transaction_cost_with_request_history -- --ignored --nocapture`에서 요청 0개/4,000개(메시지 4 KiB), 수집 예약 획득+해제 두 트랜잭션의 중앙값을 12회씩 측정했다. debug 빌드의 전체 조회 scope는 0.729/192.637ms, runtime scope는 0.657/1.268ms였다. 현재 코드의 두 scope를 비교한 값이며 이전 바이너리와의 성능 배수로 해석하지 않는다. 측정 로그는 `.local/benchmark-transactions.log`다.
+
+release CLI 스냅샷 조회도 다시 12회씩 측정했다. 이전 host의 요청 0개/4,000개 중앙값은 4.455/16.527ms, 최종 host는 3.678/3.538ms였다. 에이전트가 없는 격리 상태이며 프로세스 시작을 포함한 로컬 측정이다. 결과는 `.local/repository-benchmark-04495774b9/result.json`이다.
