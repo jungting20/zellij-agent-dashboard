@@ -21,5 +21,5 @@ fi
 dashboard_configuration="host_path=$dashboard_host,state_dir=$dashboard_state"
 zellij --session "$dashboard_session" action start-or-reload-plugin \
     "file:$dashboard_wasm" --configuration "mode=collector,$dashboard_configuration" </dev/null
-zellij --session "$dashboard_session" plugin --floating \
+zellij --session "$dashboard_session" plugin --floating --x 5% --y 7% --width 90% --height 85% \
     --configuration "mode=dashboard,$dashboard_configuration" -- "file:$dashboard_wasm" </dev/null

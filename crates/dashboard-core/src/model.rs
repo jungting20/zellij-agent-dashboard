@@ -90,6 +90,23 @@ pub struct Agent {
     pub alias: String,
     #[serde(default)]
     pub parent_id: Option<String>,
+    #[serde(default)]
+    pub pane: PaneInfo,
+    #[serde(default)]
+    pub last_instruction_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PaneInfo {
+    pub tab_id: Option<u32>,
+    pub tab_name: String,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PaneOutput {
+    pub agent_id: String,
+    pub text: String,
 }
 
 impl Agent {
@@ -147,6 +164,8 @@ pub struct Activity {
     pub at_ms: u64,
     pub status: Status,
     pub project: String,
+    #[serde(default)]
+    pub previous: Option<Status>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -156,6 +175,12 @@ pub struct Store {
     pub last_scan_ms: u64,
     pub agents: BTreeMap<String, Agent>,
     pub activities: Vec<Activity>,
+    #[serde(default)]
+    pub requests: BTreeMap<String, crate::ActionResult>,
+    #[serde(default)]
+    pub launches: BTreeMap<String, crate::LaunchInfo>,
+    #[serde(default)]
+    pub recent_directories: Vec<String>,
 }
 
 impl Default for Store {
@@ -166,6 +191,9 @@ impl Default for Store {
             last_scan_ms: 0,
             agents: BTreeMap::new(),
             activities: Vec::new(),
+            requests: BTreeMap::new(),
+            launches: BTreeMap::new(),
+            recent_directories: Vec::new(),
         }
     }
 }
@@ -229,6 +257,7 @@ impl Store {
         }
         if !event.summary.is_empty() {
             agent.summary.clone_from(&event.summary);
+            agent.last_instruction_ms = Some(event.observed_at_ms);
         }
         agent.detail.clone_from(&event.detail);
         let next = match event.kind {
@@ -252,6 +281,7 @@ impl Store {
             }
         };
         if next != agent.status {
+            let previous = agent.status;
             agent.status = next;
             agent.status_since_ms = event.observed_at_ms;
             self.activities.push(Activity {
@@ -259,6 +289,7 @@ impl Store {
                 at_ms: event.observed_at_ms,
                 status: next,
                 project: agent.project().into(),
+                previous: Some(previous),
             });
             if self.activities.len() > 50 {
                 self.activities.drain(..self.activities.len() - 50);
@@ -296,6 +327,8 @@ impl Store {
                     pinned: false,
                     alias: String::new(),
                     parent_id: None,
+                    pane: PaneInfo::default(),
+                    last_instruction_ms: None,
                 });
         }
         // Retain a short history without letting ended processes accumulate forever.
@@ -329,6 +362,19 @@ impl Store {
             activities: self.activities.clone(),
         }
     }
+
+    /// Setting an explicit value is idempotent when replicas repeat a request.
+    pub fn set_pinned(&mut self, id: &str, pinned: bool) -> Result<(), String> {
+        let agent = self.agents.get_mut(id).ok_or("agent no longer exists")?;
+        if agent.liveness != Liveness::Live || agent.ended {
+            return Err("agent process changed or exited; refresh the list".into());
+        }
+        if agent.pinned != pinned {
+            agent.pinned = pinned;
+            self.revision += 1;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -349,6 +395,22 @@ mod tests {
             tool: "claude".into(),
             cwd: "/project/api".into(),
         }
+    }
+
+    #[test]
+    fn pin_requests_are_idempotent_persist_and_reject_exited_generations() {
+        let mut store = Store::default();
+        store.reconcile(&[found("run")], 1000);
+        store.set_pinned("run", true).unwrap();
+        let revision = store.revision;
+        store.set_pinned("run", true).unwrap();
+        assert_eq!(store.revision, revision);
+        let recovered: Store =
+            serde_json::from_str(&serde_json::to_string(&store).unwrap()).unwrap();
+        assert!(recovered.agents["run"].pinned);
+        store.reconcile(&[found("replacement")], 1100);
+        assert!(store.set_pinned("run", false).is_err());
+        assert!(!store.agents["replacement"].pinned);
     }
 
     fn event(run: &str, sequence: u64, kind: EventKind) -> AgentEvent {

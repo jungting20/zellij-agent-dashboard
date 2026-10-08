@@ -1,4 +1,7 @@
+mod actions;
+mod command;
 mod hooks;
+mod panes;
 mod process;
 mod storage;
 
@@ -63,8 +66,29 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
     }
     let command = args.first().map(String::as_str).unwrap_or("help");
     match command {
+        "requests" => {
+            let locked = LockedStore::open(&dir)?;
+            let mut records: Vec<_> = locked.store.requests.values().cloned().collect();
+            records.sort_by_key(|r| std::cmp::Reverse(r.at_ms));
+            records.truncate(50);
+            json(&records)
+        }
+        "catalog" => json(&actions::catalog(&dir)?),
+        "action" => {
+            let request = serde_json::from_str(args.get(1).ok_or("action requires JSON request")?)
+                .map_err(|e| e.to_string())?;
+            json(&actions::action(&dir, request)?)
+        }
+        "result" => json(&actions::result(
+            &dir,
+            args.get(1).ok_or("result requires request ID")?,
+        )?),
+        "edited" => json(&actions::edited(
+            &dir,
+            args.get(1).ok_or("edited requires request ID")?,
+        )?),
         "help" | "--help" => {
-            println!("dashboard-host [--state-dir /path] <scan|snapshot|resolve ID|hook --tool claude|hook-config>");
+            println!("dashboard-host [--state-dir /path] <scan|snapshot|resolve ID|pin ID true/false|preview ID|hook --tool claude|hook-config>");
             Ok(())
         }
         "hook-config" => json(&hooks::claude_config(
@@ -86,6 +110,8 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
             if at.saturating_sub(locked.store.last_scan_ms) >= 1800 {
                 let inventory = process::inventory()?;
                 locked.store.reconcile(&inventory.found, at);
+                actions::link_launches(&mut locked.store, &inventory);
+                panes::refresh_metadata(&mut locked.store);
                 locked.save()?;
             }
             json(&locked.store.snapshot(at))
@@ -93,6 +119,33 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
         "snapshot" => {
             let locked = LockedStore::open(&dir)?;
             json(&locked.store.snapshot(now_ms()))
+        }
+        "pin" => {
+            let id = args.get(1).ok_or("pin requires an agent ID")?;
+            let pinned = args
+                .get(2)
+                .ok_or("pin requires true or false")?
+                .parse::<bool>()
+                .map_err(|_| "pin requires true or false")?;
+            let mut locked = LockedStore::open(&dir)?;
+            let inventory = process::inventory()?;
+            locked.store.reconcile(&inventory.found, now_ms());
+            locked.store.set_pinned(id, pinned)?;
+            locked.save()?;
+            json(&locked.store.agents[id])
+        }
+        "preview" => {
+            let id = args.get(1).ok_or("preview requires an agent ID")?;
+            let agent = {
+                let locked = LockedStore::open(&dir)?;
+                locked
+                    .store
+                    .agents
+                    .get(id)
+                    .cloned()
+                    .ok_or("agent no longer exists")?
+            };
+            json(&panes::preview(&agent)?)
         }
         "resolve" => {
             let id = args.get(1).ok_or("resolve requires an agent ID")?;

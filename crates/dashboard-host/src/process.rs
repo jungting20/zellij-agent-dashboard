@@ -12,6 +12,7 @@ pub struct Process {
 pub struct Inventory {
     pub processes: Vec<Process>,
     pub found: Vec<FoundProcess>,
+    pub epochs: BTreeMap<String, String>,
 }
 
 pub fn env_value(command: &str, key: &str) -> Option<String> {
@@ -74,12 +75,18 @@ fn tool(command: &str) -> Option<&'static str> {
         "agent" => Some("cursor"),
         "agy" => Some("gemini"),
         "hermes" => Some("hermes"),
+        "pi" => Some("pi"),
+        "gemini" => Some("gemini"),
         "node" => {
             let script = args.next()?;
             if script.contains("/@anthropic-ai/claude-code/") {
                 Some("claude")
             } else if script.contains("/@openai/codex/") {
                 Some("codex")
+            } else if script.contains("/pi-coding-agent/") {
+                Some("pi")
+            } else if script.contains("/@google/gemini-cli/") {
+                Some("gemini")
             } else {
                 None
             }
@@ -180,7 +187,11 @@ pub fn parse_inventory(text: &str) -> Result<Inventory, String> {
                 && is_ancestor(&processes, candidate.identity.pid, other.identity.pid)
         })
     });
-    Ok(Inventory { processes, found })
+    Ok(Inventory {
+        processes,
+        found,
+        epochs: servers,
+    })
 }
 
 pub fn is_ancestor(processes: &[Process], ancestor: u32, mut child: u32) -> bool {
