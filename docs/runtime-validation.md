@@ -171,3 +171,7 @@ Rust 포맷 검사, 코어 테스트 29개와 WASM release 빌드를 통과했�
 `gg` 요청에 대시보드 세션을 담아 선택한 에이전트의 현재 cwd로 그 세션에 새 floating lazygit pane을 연다. 기존 요청의 선택적 세션 기본값과 중복 비교 호환성을 검증했다. `./scripts/check.sh`에서 코어 30개·호스트 50개 테스트, 포맷·네이티브/WASI Clippy·스크립트 구문 검사를 통과했다. 수동 성능 테스트 1개는 제외했다. `./scripts/build.sh`로 release host와 wasm32-wasip1 플러그인을 빌드했다.
 
 `python3 scripts/smoke.py` 전체 검증을 임시 세션 두 개에서 통과했다. 결과는 `.local/smoke-2055c25588/result.json`이다. floating 대시보드에서 다른 세션의 에이전트를 선택하고 실제 `gg` 입력으로 대시보드 세션의 floating pane 생성·대상 pane의 현재 cwd 사용·요청 재전송 시 중복 생성 방지·`q` 종료와 대시보드 조작 재개를 확인했다. 기존 멀티 클라이언트·세션 이동·detach·reload·SQLite 검사도 통과했다. 초기 실행의 오래된 cwd 비교와 불필요한 Esc 입력을 고쳤으며, 중단한 실행과 권한 승인 시간 초과 실행은 통과 기록에 포함하지 않았다. 임시 세션과 프로세스는 정리했고 운영 세션에 설치·reload는 적용하지 않았다.
+
+## 전체 실행 세션 적용 (2026-10-12)
+
+사용자 요청으로 최신 설치 host/WASM과 dist의 SHA-256 일치를 확인하고, 실행 중인 `study`, `운영`, `wiki`, `zellij-with-code-agent`, `loop` 다섯 세션의 기존 `agent-dashboard` 별칭 collector를 모두 reload했다. 각 세션에서 기존 plugin ID 0 유지, permissions=true, error=null, 상태 revision 응답과 중복 인스턴스 없음까지 확인했다. 적용 당시 열려 있는 dashboard 화면 인스턴스는 없었으며 이후 새 화면은 최신 설치 host/WASM을 사용한다. 연결된 클라이언트가 없는 네 세션에는 검증용 클라이언트를 잠시 연결했다가 종료했고 기존 클라이언트는 유지했다. 결과는 `.local/apply-all-sessions-20261012.json`이다.
