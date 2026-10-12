@@ -164,6 +164,8 @@ Zellij 0.45.0에서 `python3 scripts/smoke.py`를 통과했다. 결과는 `.loca
 
 Rust 포맷 검사, 코어 테스트 29개와 WASM release 빌드를 통과했다. 임시 세션에서 대시보드 로딩·검색까지 확인했지만 plugin pane의 화면 조회를 이용한 제목 표시 검사는 시간 초과됐다. 전체 smoke 통과나 실제 표시 확인 성공으로 기록하지 않는다. 로그는 `.local/smoke-inline-activity.log`, 진단은 `.local/smoke-73e8805a72`다. 임시 세션과 프로세스는 정리했으며 운영 세션에 reload는 적용하지 않았다.
 
+2026-10-12 사용자 요청으로 `scripts/check.sh`의 코어 30개·호스트 50개 테스트, 포맷·네이티브/WASI Clippy·스크립트 구문 검사를 통과하고 `scripts/build.sh`와 `scripts/install.sh`로 release host/WASM을 빌드·설치했다. 수동 성능 테스트 1개는 제외했다. 설치 파일과 dist의 SHA-256 일치를 확인했다. `운영` 세션에 검증용 클라이언트를 잠시 연결해 기존 별칭 collector를 reload하고 권한 승인·상태 revision 응답을 확인했다. 설치된 host로 대시보드를 열어 실제 클라이언트 출력의 PINNED/UNPINNED 제목과 상태 변화 화살표를 확인했으며 화면 인스턴스도 permissions=true, error=null, source_session=운영을 응답했다. 검증용 클라이언트는 종료했고 대시보드는 열어 두었다. 기록은 `.local/apply-20261012.json`, `.local/apply-dashboard-20261012.json`, `.local/apply-dashboard-20261012.capture`다. 전체 smoke 재실행은 두 번째 임시 세션의 collector 권한 승인 대기에서 시간 초과됐으므로 전체 회귀 검증 통과로 기록하지 않는다. 해당 임시 세션은 스크립트에서 정리했으며 로그는 `.local/smoke-build-apply-20261012.log`다.
+
 ## 대시보드 세션에서 lazygit 실행
 
 `gg` 요청에 대시보드 세션을 담아 선택한 에이전트의 현재 cwd로 그 세션에 새 floating lazygit pane을 연다. 기존 요청의 선택적 세션 기본값과 중복 비교 호환성을 검증했다. `./scripts/check.sh`에서 코어 30개·호스트 50개 테스트, 포맷·네이티브/WASI Clippy·스크립트 구문 검사를 통과했다. 수동 성능 테스트 1개는 제외했다. `./scripts/build.sh`로 release host와 wasm32-wasip1 플러그인을 빌드했다.
