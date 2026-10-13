@@ -1,5 +1,15 @@
 # 실행 검증 기록
 
+## 2026-10-14 세션 이름 변경 후 auth 이동 복구
+
+`auth` 실행은 서버 PID 43075의 세션 이름이 `likable-glockenspiel`에서 `study`로 변경된 뒤에도 옛 이름으로 수집됐다. 서버 argv와 기존 에이전트 환경변수는 그대로인데 socket 파일은 `study`로 변경된 것을 확인했다. macOS의 `LOCAL_PEERPID`로 실제 socket의 서버 PID를 확인하고 서버 조상으로 에이전트를 연결하도록 수정했다. Linux는 `SO_PEERCRED` 경로를 구현했으며 이번 실검증은 macOS/Zellij 0.45.0이다.
+
+`bash scripts/check.sh`에서 코어 31개·호스트 53개 테스트, 포맷, 네이티브/WASI Clippy와 스크립트 검사를 통과했다. 수동 성능 테스트 1개는 제외했다. 이름 변경과 옛 이름 재사용 시 서버 구분, 감지 출처·작업 상태·고정·별칭 유지, 원래 이름으로 복귀, 이전 조작 대상과 늦은 pane 관측 거절을 검증했다. `bash scripts/build.sh`로 release host/WASM을 빌드했다. 로컬 rustup proxy 경로가 없어 기존 `/opt/homebrew/bin/rustup`과 1.88.0 toolchain bin 경로를 환경변수로 지정했다.
+
+`python3 scripts/smoke.py`를 소유한 임시 세션 두 개에서 통과했다. 두 번째 세션을 에이전트 실행 후 이름 변경하고 새 이름의 발견·resolve, 실제 Enter 세션 이동·원래 대시보드 닫힘, collector 유지와 reload를 확인했다. 결과는 `.local/smoke-33937820e5/result.json`, 전체 로그는 `.local/smoke-auth.log`이며 임시 세션은 종료했다.
+
+`bash scripts/install.sh`로 설치하고 dist와 설치 host/WASM의 SHA-256 일치를 확인했다. 적용 대상은 `study`와 `zellij`이며 기존 collector plugin ID 0으로 reload하고 permissions=true, error=null, revision 갱신을 확인했다. 설치 host로 실제 `auth`가 `study`의 terminal pane 1로 resolve되는 것을 확인했다. `zellij`에 설치본 대시보드를 열고 `/study` 검색으로 실제 auth 행을 선택한 뒤 Enter로 `study`의 auth pane 이동과 원래 대시보드 닫힘을 확인했다. 반영 검증용 클라이언트는 종료했다. 적용 결과와 로그는 `.local/apply-auth.json`, `.local/apply-auth.log`다. 저장 형식 변경은 없다.
+
 2026년 10월 7일 macOS에서 Zellij 0.45.0, Rust 1.88.0, Claude Code 2.1.70으로 첫 조회 버전을 검증했다. 임시 세션을 사용했으며 기존 사용자 세션의 pane이나 플러그인을 교체하지 않았다.
 
 ## 자동 검사

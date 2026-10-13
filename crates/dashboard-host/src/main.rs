@@ -8,6 +8,7 @@ mod panes;
 mod process;
 mod repository;
 mod screen;
+mod session_names;
 mod sqlite_repository;
 mod terminal;
 mod zellij;
@@ -219,8 +220,9 @@ fn hook(deps: &host::HostDependencies) -> Result<(), String> {
             .iter()
             .find(|p| {
                 p.tool == "claude"
-                    && p.identity.session_name == session
                     && p.identity.pane_id == pane
+                    // The live ancestor binds the session; inherited names can
+                    // predate a rename and must not discard a valid hook.
                     && process::is_ancestor(
                         &inventory.processes,
                         p.identity.pid,

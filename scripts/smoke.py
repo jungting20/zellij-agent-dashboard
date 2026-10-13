@@ -435,6 +435,16 @@ fn main() {
 
         # Exercise keyboard search and the actual cross-session focus API.
         target = next(a for a in rows if a["identity"]["session_name"] == sessions[1])
+        old_session = sessions[1]
+        sessions[1] = f"zad renamed {run_id}"
+        call(old_session, "action", "rename-session", sessions[1])
+        def renamed_target():
+            return next((a for a in host_call("scan")["agents"]
+                         if a["identity"]["session_name"] == sessions[1]
+                         and a["identity"]["pid"] == target["identity"]["pid"]
+                         and a["liveness"] == "live"), None)
+        target = wait_for("renamed session discovers existing agent with current name", renamed_target)
+        assert host_call("resolve", target["identity"]["agent_id"])["identity"] == target["identity"]
         alias_request = json.dumps({"request_id": "sqlite-alias-once", "action": {
             "kind": "alias", "target": target["identity"], "alias": "SQLite 보존 확인"}})
         first_alias = host_call("action", alias_request)

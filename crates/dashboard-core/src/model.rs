@@ -567,6 +567,53 @@ impl Store {
         if now_ms < self.data.last_scan_ms {
             return;
         }
+        // A session rename changes its address, not the agent's execution.
+        // Preserve the chosen detector and settings while rejecting old targets.
+        let mut renamed = BTreeMap::new();
+        for process in found {
+            if self
+                .data
+                .agents
+                .get(&process.identity.agent_id)
+                .is_some_and(|agent| agent.liveness != Liveness::Gone)
+            {
+                continue;
+            }
+            let previous = self
+                .data
+                .agents
+                .values()
+                .find(|agent| {
+                    let old = &agent.identity;
+                    let new = &process.identity;
+                    !agent.ended
+                        && agent.liveness != Liveness::Gone
+                        && old.session_name != new.session_name
+                        && old.session_epoch == new.session_epoch
+                        && old.pane_id == new.pane_id
+                        && old.incarnation_id == new.incarnation_id
+                        && old.pid == new.pid
+                        && old.process_started == new.process_started
+                })
+                .cloned();
+            if let Some(mut agent) = previous {
+                renamed.insert(
+                    agent.identity.agent_id.clone(),
+                    process.identity.agent_id.clone(),
+                );
+                agent.identity = process.identity.clone();
+                self.changes.agents.insert(agent.identity.agent_id.clone());
+                self.data
+                    .agents
+                    .insert(agent.identity.agent_id.clone(), agent);
+            }
+        }
+        for agent in self.data.agents.values_mut() {
+            if let Some(parent) = agent.parent_id.as_ref().and_then(|id| renamed.get(id)) {
+                agent.parent_id = Some(parent.clone());
+                self.changes.agents.insert(agent.identity.agent_id.clone());
+            }
+        }
         for agent in self.data.agents.values_mut() {
             let next = if !agent.ended && found.iter().any(|p| p.identity == agent.identity) {
                 Liveness::Live
@@ -751,6 +798,53 @@ mod tests {
             summary: String::new(),
             detail: String::new(),
         }
+    }
+
+    #[test]
+    fn session_rename_preserves_execution_state_and_rejects_old_targets() {
+        let mut store = Store::default();
+        let old = found("run");
+        store.reconcile(&[old.clone()], 1000);
+        store
+            .apply(&event("run", 1, EventKind::TurnStarted))
+            .unwrap();
+        store.data.agents.get_mut("run").unwrap().pinned = true;
+        store.data.agents.get_mut("run").unwrap().alias = "auth".into();
+        let mut renamed = old.clone();
+        renamed.identity.session_name = "renamed".into();
+        renamed.identity.agent_id = "renamed-run".into();
+        store.reconcile(&[renamed.clone()], 1100);
+        let agent = &store.data.agents["renamed-run"];
+        assert_eq!(agent.status_source, StatusSource::Hook);
+        assert_eq!(agent.status, Status::Working);
+        assert_eq!(agent.sequence, 1);
+        assert!(agent.pinned);
+        assert_eq!(agent.alias, "auth");
+        assert_eq!(store.data.agents["run"].liveness, Liveness::Gone);
+        assert!(store.validate_target(&old.identity).is_err());
+        assert!(!store.observe_pane(
+            &old.identity,
+            PaneInfo {
+                presence: PanePresence::Present,
+                observed_at_ms: 1200,
+                ..PaneInfo::default()
+            }
+        ));
+        let mut hook = event("run", 2, EventKind::TurnFinished);
+        hook.identity = renamed.identity.clone();
+        hook.observed_at_ms = 1200;
+        assert_eq!(store.apply(&hook), Ok(ApplyResult::Applied));
+        assert_eq!(store.data.agents["renamed-run"].status, Status::Done);
+        store.reconcile(&[renamed], 1300);
+        assert_eq!(
+            store.data.agents["renamed-run"].status_source,
+            StatusSource::Hook
+        );
+        store.data.agents.get_mut("renamed-run").unwrap().alias = "updated".into();
+        store.reconcile(&[old], 1400);
+        assert_eq!(store.data.agents["run"].alias, "updated");
+        assert_eq!(store.data.agents["run"].status, Status::Done);
+        assert_eq!(store.data.agents["run"].status_source, StatusSource::Hook);
     }
 
     #[test]

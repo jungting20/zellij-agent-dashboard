@@ -114,6 +114,13 @@ fn tool(command: &str) -> Option<&'static str> {
 }
 
 pub fn parse_inventory(text: &str) -> Result<Inventory, String> {
+    parse_inventory_with_sessions(text, &BTreeMap::new())
+}
+
+fn parse_inventory_with_sessions(
+    text: &str,
+    current_sessions: &BTreeMap<u32, String>,
+) -> Result<Inventory, String> {
     let processes: Vec<_> = text
         .lines()
         .filter(|l| !l.trim().is_empty())
@@ -123,6 +130,7 @@ pub fn parse_inventory(text: &str) -> Result<Inventory, String> {
         return Err("empty process inventory; previous state retained".into());
     }
     let mut servers = BTreeMap::new();
+    let mut server_names = BTreeMap::new();
     for process in &processes {
         let mut args = process.command.split_whitespace();
         let executable = args.next().unwrap_or("");
@@ -150,11 +158,16 @@ pub fn parse_inventory(text: &str) -> Result<Inventory, String> {
                     .then_some(i)
             })
             .unwrap_or(socket.len());
-        let session = Path::new(socket[..socket_end].trim())
+        let original_session = Path::new(socket[..socket_end].trim())
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("");
+        let session = current_sessions
+            .get(&process.pid)
+            .map(String::as_str)
+            .unwrap_or(original_session);
         if !session.is_empty() {
+            server_names.insert(process.pid, session.to_owned());
             servers.insert(
                 session.to_owned(),
                 format!("{}:{}", process.pid, process.started),
@@ -169,6 +182,13 @@ pub fn parse_inventory(text: &str) -> Result<Inventory, String> {
         let Some(session) = env_value(&process.command, "ZELLIJ_SESSION_NAME") else {
             continue;
         };
+        // Rename does not update existing processes' argv or environment.
+        // Bind descendants to their server, even when the old name was reused.
+        let session = server_names
+            .iter()
+            .find(|(pid, _)| is_ancestor(&processes, **pid, process.pid))
+            .map(|(_, name)| name.clone())
+            .unwrap_or(session);
         let Some(pane) =
             env_value(&process.command, "ZELLIJ_PANE_ID").and_then(|s| s.parse::<u32>().ok())
         else {
@@ -245,11 +265,17 @@ pub fn inventory(runner: &dyn CommandRunner) -> Result<Inventory, String> {
     if !output.success {
         return Err("process inventory failed; previous state retained".into());
     }
-    let parsed = parse_inventory(&String::from_utf8_lossy(&output.stdout))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let parsed = parse_inventory(&text)?;
     if !parsed.processes.iter().any(|p| p.pid == std::process::id()) {
         return Err("incomplete process inventory; previous state retained".into());
     }
-    Ok(parsed)
+    let sessions = crate::session_names::current_sessions(&parsed.processes);
+    if sessions.is_empty() {
+        Ok(parsed)
+    } else {
+        parse_inventory_with_sessions(&text, &sessions)
+    }
 }
 
 #[cfg(test)]
@@ -285,6 +311,29 @@ mod tests {
         );
         assert!(parse_inventory("truncated").is_err());
         assert!(parse_inventory("").is_err());
+    }
+
+    #[test]
+    fn renamed_server_owns_old_and_new_environments_when_old_name_is_reused() {
+        let text = "10 1 Mon Oct 5 10:00:00 2026 zellij --server /tmp/old\n20 10 Mon Oct 5 10:01:00 2026 codex ZELLIJ_SESSION_NAME=old ZELLIJ_PANE_ID=7\n21 10 Mon Oct 5 10:02:00 2026 claude ZELLIJ_SESSION_NAME=new ZELLIJ_PANE_ID=8\n30 1 Mon Oct 5 10:03:00 2026 zellij --server /tmp/old\n40 30 Mon Oct 5 10:04:00 2026 codex ZELLIJ_SESSION_NAME=old ZELLIJ_PANE_ID=7\n";
+        let names = BTreeMap::from([(10, "new".into()), (30, "old".into())]);
+        let inventory = parse_inventory_with_sessions(text, &names).unwrap();
+        assert_eq!(inventory.found.len(), 3);
+        assert_eq!(inventory.found[0].identity.session_name, "new");
+        assert_eq!(inventory.found[1].identity.session_name, "new");
+        assert_eq!(inventory.found[2].identity.session_name, "old");
+        assert_eq!(
+            inventory.found[0].identity.session_epoch,
+            inventory.epochs["new"]
+        );
+        assert_eq!(
+            inventory.found[2].identity.session_epoch,
+            inventory.epochs["old"]
+        );
+        assert_ne!(
+            inventory.found[0].identity.session_epoch,
+            inventory.found[2].identity.session_epoch
+        );
     }
 
     #[test]
