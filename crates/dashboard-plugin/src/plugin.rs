@@ -310,6 +310,7 @@ fi"#,
         }
         match key.bare_key {
             BareKey::Char('i') => self.open_menu(MenuKind::Input),
+            BareKey::Char('e') => self.open_neovim(),
             BareKey::Char('I') => {
                 self.open_menu(MenuKind::Input);
                 self.edit_instruction();
@@ -601,6 +602,11 @@ impl ZellijPlugin for Dashboard {
                     match serde_json::from_slice::<Agent>(&stdout) {
                         Ok(agent) if context.get("agent_id") == Some(&agent.identity.agent_id) => {
                             self.focus_agent(&agent);
+                            // Only the dashboard's resolved selection closes its pane.
+                            // Collector navigation must keep collecting after focus changes.
+                            if !self.collector {
+                                close_self();
+                            }
                         }
                         _ => self.message = "Selected agent changed; refresh the list".into(),
                     }

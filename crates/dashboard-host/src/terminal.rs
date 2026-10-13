@@ -17,6 +17,7 @@ pub struct TerminalPane {
 }
 
 pub struct NewPane {
+    pub tab_id: Option<u32>,
     pub cwd: PathBuf,
     pub title: String,
     pub floating: bool,

@@ -33,6 +33,8 @@ collector는 시작 권한을 받은 뒤 화면에서 숨겨진다. 대시보드
 
 `gg`의 lazygit 조작은 선택한 에이전트의 실행 세대를 검증하고 해당 cwd를 사용하되, 요청의 `session`에 지정한 대시보드 세션에 새 floating pane을 생성한다. 종료 시 pane을 닫고 생성 시 초점을 준다. 요청 JSON의 선택적 `session` 필드 기본값은 없음이며, 필드가 없는 기존 요청은 대상 에이전트 세션을 사용한다. 기본값은 직렬화에서 생략하여 저장된 요청의 중복 비교를 유지한다. DB 구조 2·도메인/스냅샷 3·이벤트 JSON 1을 유지하며 별도 이관이나 복구 작업은 필요 없다. 변경된 host와 WASM은 함께 갱신한다.
 
+`e`의 Neovim 조작은 `kind=neovim`, `target`, 필수 `session`을 요청에 저장한다. 기본 세션은 암묵적으로 정하지 않고 화면이 대시보드 세션을 전달한다. 호스트는 대상 실행 세대와 pane의 현재 cwd를 다시 확인하고 대시보드 세션에 `nvim .`을 실행하는 floating pane을 생성한다. 종료 시 편집기 pane만 닫히고 대시보드는 유지한다. 기존 요청 접수·결과 저장 계약으로 같은 요청의 중복 실행을 막는다. DB 구조 2·도메인/스냅샷 3·이벤트 JSON 1과 기존 요청 형식은 유지한다. 새 action 종류를 모르는 이전 host로 롤백할 때는 Neovim 요청이 기록되기 전의 DB 백업을 사용해야 하며, 현재 host와 WASM은 함께 갱신한다.
+
 `ZellijCli`는 실행 파일 경로와 `CommandRunner`를 주입받고 Zellij 명령 조립과 응답 파싱을 담당한다. `CommandRunner`는 Zellij 외에도 git, ps, zoxide, 자식 worktree 셸 명령을 실행한다. `CommandSpec`은 프로그램·argv·cwd·환경 변수 설정/제거·선택적 timeout·스트림별 출력 제한·수집/폐기 모드를 정의한다. 실행기는 종료 상태와 stdout/stderr를 반환하며 실행 오류, timeout, 출력 초과를 구분한다. timeout과 출력 초과 시 자식을 종료하고 회수한다. argv는 셸에 재해석하지 않고 직접 전달한다. 사용자가 요청한 셸 명령과 EDITOR 실행만 기존 셸 경로를 유지한다.
 
 입력의 bracketed paste와 Enter는 별도 호출이며 그 사이에 대상 실행 세대를 재검증한다. 중복 요청, 고정 대상 보호, 불명확한 결과의 자동 재전송 금지와 통지 실패 무시 정책은 유지한다. 기존 timeout과 출력 제한을 보존하며 ps는 timeout 없이 64 MiB 제한과 locale 설정을 사용한다.

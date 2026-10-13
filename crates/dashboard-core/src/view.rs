@@ -318,9 +318,9 @@ impl View {
         let footer = vec![
             Line::color(rule, color, false),
             Line::plain(if width >= 75 {
-                "Tab working h/l 영역 p 지시 n 새 실행 i 입력 I 에디터 g worktree m 병합 a 태그 Space pin d 종료 Enter 이동 R 갱신 q 닫기"
+                "Tab working h/l 영역 p 지시 n 새 실행 e Neovim i 입력 I 에디터 g worktree m 병합 a 태그 Space pin d 종료 Enter 이동 R 갱신 q 닫기"
             } else {
-                "Tab working h/l 영역 Space pin Enter focus / 검색 q quit"
+                "Tab working h/l 영역 e Neovim Space pin Enter focus / 검색 q quit"
             }),
         ];
         if height < 3 {

@@ -174,7 +174,29 @@ fn git(directory: &Path, args: &[&str], deps: &HostDependencies) -> Result<Strin
     Ok(String::from_utf8_lossy(&bytes).trim().into())
 }
 
+fn choose_launch_tab(
+    matches: std::collections::BTreeSet<(String, u32)>,
+    preferred_session: &str,
+) -> Result<(String, u32), String> {
+    let preferred: Vec<_> = matches
+        .iter()
+        .filter(|(s, _)| s == preferred_session)
+        .cloned()
+        .collect();
+    let candidates: Vec<_> = if preferred.is_empty() {
+        matches.into_iter().collect()
+    } else {
+        preferred
+    };
+    match candidates.as_slice() {
+        [target] => Ok(target.clone()),
+        [] => Err("선택한 경로가 열려 있는 Zellij 세션·탭을 찾을 수 없습니다".into()),
+        _ => Err("선택한 경로가 여러 Zellij 탭에 열려 있어 실행 대상을 결정할 수 없습니다".into()),
+    }
+}
+
 struct LaunchTarget<'a> {
+    tab_id: Option<u32>,
     session: &'a str,
     epoch: &'a str,
     directory: &'a str,
@@ -188,6 +210,7 @@ fn launch(
     deps: &HostDependencies,
 ) -> Result<(String, Option<u32>, String), String> {
     let LaunchTarget {
+        tab_id,
         session,
         epoch,
         directory,
@@ -207,6 +230,24 @@ fn launch(
     }
     if let Some(parent) = parent {
         checked(parent, deps)?;
+    }
+    if let Some(tab) = tab_id {
+        let panes = deps.terminal.list_panes(
+            &SessionId(session.into()),
+            true,
+            Duration::from_millis(1200),
+        )?;
+        if !panes.iter().any(|pane| {
+            pane.tab_id == Some(tab)
+                && pane
+                    .cwd
+                    .as_deref()
+                    .and_then(|p| fs::canonicalize(p).ok())
+                    .as_ref()
+                    == Some(&path)
+        }) {
+            return Err("실행 대상 탭의 작업 경로가 변경되었습니다. 다시 시도하세요".into());
+        }
     }
     let directory = path.to_string_lossy().to_string();
     {
@@ -229,6 +270,7 @@ fn launch(
     let pane = pane_number(&deps.terminal.new_pane(
         &SessionId(session.into()),
         &NewPane {
+            tab_id,
             cwd: path.clone(),
             title: format!(
                 "{tool} · {}",
@@ -311,17 +353,48 @@ fn execute(
             epoch,
             cwd,
             tool,
-        } => launch(
-            request,
-            LaunchTarget {
-                session,
-                epoch,
-                directory: cwd,
-                tool,
-                parent: None,
-            },
-            deps,
-        ),
+        } => {
+            let path = self::cwd(cwd)?;
+            let inventory = process::inventory(deps.runner)?;
+            if inventory.epochs.get(session) != Some(epoch) {
+                return Err("Zellij session changed or exited".into());
+            }
+            let mut matches = std::collections::BTreeSet::new();
+            for name in inventory.epochs.keys() {
+                let panes = deps.terminal.list_panes(
+                    &SessionId(name.clone()),
+                    true,
+                    Duration::from_millis(1200),
+                )?;
+                for pane in panes {
+                    if pane
+                        .cwd
+                        .as_deref()
+                        .and_then(|p| fs::canonicalize(p).ok())
+                        .as_ref()
+                        == Some(&path)
+                    {
+                        if let Some(tab) = pane.tab_id {
+                            matches.insert((name.clone(), tab));
+                        }
+                    }
+                }
+            }
+            let (destination, tab) = choose_launch_tab(matches, session)?;
+            let destination_epoch = &inventory.epochs[&destination];
+            launch(
+                request,
+                LaunchTarget {
+                    tab_id: Some(tab),
+                    session: &destination,
+                    epoch: destination_epoch,
+                    directory: cwd,
+                    tool,
+                    parent: None,
+                },
+                deps,
+            )
+        }
         Action::Worktree {
             parent,
             branch,
@@ -377,6 +450,7 @@ fn execute(
             launch(
                 request,
                 LaunchTarget {
+                    tab_id: None,
                     session: &parent.session_name,
                     epoch: &parent.session_epoch,
                     directory: &path.to_string_lossy(),
@@ -392,6 +466,7 @@ fn execute(
             let pane = pane_number(&deps.terminal.new_pane(
                 &SessionId(session.as_ref().unwrap_or(&target.session_name).clone()),
                 &NewPane {
+                    tab_id: None,
                     cwd: agent.cwd.into(),
                     title: "lazygit".into(),
                     floating: true,
@@ -402,6 +477,34 @@ fn execute(
                 },
             )?)?;
             Ok(("lazygit 실행 완료".into(), Some(pane), String::new()))
+        }
+        Action::Neovim { target, session } => {
+            let panes = deps.terminal.list_panes(
+                &SessionId(target.session_name.clone()),
+                true,
+                Duration::from_millis(500),
+            )?;
+            let pane = panes
+                .iter()
+                .find(|pane| pane.id == pane_id(target.pane_id))
+                .ok_or("agent pane no longer exists; refresh the list")?;
+            // Revalidate the execution after reading its current directory.
+            let agent = checked(target, deps)?;
+            let exe = executable("nvim")?;
+            let pane = pane_number(&deps.terminal.new_pane(
+                &SessionId(session.clone()),
+                &NewPane {
+                    tab_id: None,
+                    cwd: pane.cwd.clone().unwrap_or(agent.cwd).into(),
+                    title: "Neovim".into(),
+                    floating: true,
+                    close_on_exit: true,
+                    no_focus: false,
+                    program: exe.into_os_string(),
+                    args: vec![".".into()],
+                },
+            )?)?;
+            Ok(("Neovim 실행 완료".into(), Some(pane), String::new()))
         }
         Action::Editor { target, text } => {
             let agent = checked(target, deps)?;
@@ -417,6 +520,7 @@ fn execute(
             let pane = pane_number(&deps.terminal.new_pane(
                 &SessionId(target.session_name.clone()),
                 &NewPane {
+                    tab_id: None,
                     cwd: agent.cwd.into(),
                     title: "지시 편집".into(),
                     floating: true,
@@ -668,6 +772,32 @@ mod tests {
         fn notify_changed(&self, _: &SessionId, _: &str) -> Result<(), String> {
             panic!("unexpected notify")
         }
+    }
+
+    #[test]
+    fn launch_tab_selection_deduplicates_and_rejects_ambiguous_or_missing_destinations() {
+        let matches = [("dev".into(), 3), ("dev".into(), 3), ("other".into(), 7)]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            choose_launch_tab(matches, "dev").unwrap(),
+            ("dev".into(), 3)
+        );
+        assert_eq!(
+            choose_launch_tab([("other".into(), 7)].into_iter().collect(), "dev").unwrap(),
+            ("other".into(), 7)
+        );
+        assert!(choose_launch_tab(Default::default(), "dev").is_err());
+        assert!(choose_launch_tab(
+            [("dev".into(), 3), ("dev".into(), 4)].into_iter().collect(),
+            "dev"
+        )
+        .is_err());
+        assert!(choose_launch_tab(
+            [("a".into(), 3), ("b".into(), 4)].into_iter().collect(),
+            "dev"
+        )
+        .is_err());
     }
 
     #[test]

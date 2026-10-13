@@ -5,6 +5,30 @@ use dashboard_core::{
 };
 
 impl Dashboard {
+    pub(super) fn open_neovim(&mut self) {
+        if !self.permissions || self.action_pending || self.active_request.is_some() {
+            return;
+        }
+        if self.view.source_session.is_empty() {
+            self.message = "대시보드의 Zellij 세션을 확인할 수 없습니다".into();
+            return;
+        }
+        let target = self.snapshot.as_ref().and_then(|s| {
+            s.agents
+                .iter()
+                .find(|a| Some(&a.identity.agent_id) == self.view.selected_id.as_ref())
+                .map(|a| a.identity.clone())
+        });
+        let Some(target) = target else {
+            self.message = "선택한 에이전트가 없습니다".into();
+            return;
+        };
+        self.submit(Action::Neovim {
+            target,
+            session: self.view.source_session.clone(),
+        });
+    }
+
     pub(super) fn open_menu(&mut self, kind: MenuKind) {
         if !self.permissions || self.action_pending {
             return;

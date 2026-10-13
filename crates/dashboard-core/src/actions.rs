@@ -37,6 +37,10 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
     },
+    Neovim {
+        target: Identity,
+        session: String,
+    },
     Editor {
         target: Identity,
         text: String,
@@ -62,6 +66,7 @@ impl Action {
             | Self::Close { target }
             | Self::Alias { target, .. }
             | Self::Lazygit { target, .. }
+            | Self::Neovim { target, .. }
             | Self::Editor { target, .. } => Some(target),
         }
     }

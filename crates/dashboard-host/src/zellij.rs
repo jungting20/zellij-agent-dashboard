@@ -213,6 +213,9 @@ impl TerminalHost for ZellijCli<'_> {
     }
     fn new_pane(&self, session: &SessionId, options: &NewPane) -> Result<PaneId, String> {
         let mut args = vec!["new-pane".into()];
+        if let Some(tab) = options.tab_id {
+            args.extend(["--tab-id".into(), tab.to_string().into()]);
+        }
         if options.no_focus {
             args.push("--no-focus".into());
         }
@@ -337,6 +340,7 @@ mod tests {
         let runner = RecordingRunner::new(b"terminal_42\n");
         let host = ZellijCli::new("zellij", &runner);
         let options = NewPane {
+            tab_id: Some(9),
             cwd: "/한글 경로".into(),
             title: "작업 창".into(),
             floating: true,
@@ -356,6 +360,8 @@ mod tests {
                 "dev",
                 "action",
                 "new-pane",
+                "--tab-id",
+                "9",
                 "--no-focus",
                 "--floating",
                 "--close-on-exit",

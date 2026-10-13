@@ -175,3 +175,30 @@ Rust 포맷 검사, 코어 테스트 29개와 WASM release 빌드를 통과했�
 ## 전체 실행 세션 적용 (2026-10-12)
 
 사용자 요청으로 최신 설치 host/WASM과 dist의 SHA-256 일치를 확인하고, 실행 중인 `study`, `운영`, `wiki`, `zellij-with-code-agent`, `loop` 다섯 세션의 기존 `agent-dashboard` 별칭 collector를 모두 reload했다. 각 세션에서 기존 plugin ID 0 유지, permissions=true, error=null, 상태 revision 응답과 중복 인스턴스 없음까지 확인했다. 적용 당시 열려 있는 dashboard 화면 인스턴스는 없었으며 이후 새 화면은 최신 설치 host/WASM을 사용한다. 연결된 클라이언트가 없는 네 세션에는 검증용 클라이언트를 잠시 연결했다가 종료했고 기존 클라이언트는 유지했다. 결과는 `.local/apply-all-sessions-20261012.json`이다.
+
+## 에이전트 이동 후 대시보드 닫기 (2026-10-12)
+
+대시보드의 대상 resolve가 성공하면 이동 요청 직후 `close_self()`로 화면 pane을 닫는다. resolve 실패·다른 실행 응답은 기존 오류 처리로 화면을 유지한다. collector의 전역 next 경로는 닫지 않는다. Zellij 이동 API에는 성공 응답이 없어 대상 확인과 이동 요청 사이의 실행 종료까지 성공 여부를 확인하는 계약은 아니다.
+
+`bash scripts/check.sh`에서 코어 30개·호스트 50개 테스트, 포맷·네이티브/WASI Clippy·스크립트 구문 검사를 통과했고 `bash scripts/build.sh`로 release host/WASM을 빌드했다. 수동 성능 테스트 1개는 제외했다. `python3 scripts/smoke.py` 전체 검증을 임시 세션 두 개에서 통과했다. 실제 Enter 입력으로 같은 세션의 대상 pane 초점 및 대시보드 제거, 다른 세션 이동 및 원래 세션의 대시보드 제거, collector 유지와 전역 이동을 확인했다. 결과는 `.local/smoke-c8778ae2d4/result.json`, 로그는 `.local/smoke-close-after-focus-20261012.log`이며 임시 세션은 정리했다.
+
+`bash scripts/install.sh`로 설치하고 dist와 설치 host/WASM의 SHA-256 일치를 확인했다. 사용자 세션 `운영`, `study`, `loop`, `wiki`, `zellij-with-code-agent`의 collector와 `운영`에 열려 있던 대시보드를 reload했다. 모든 대상의 permissions=true, error=null, 상태 revision과 기존 plugin ID 유지·중복 없음까지 확인했다. 임시 연결 클라이언트는 종료했고 기존 클라이언트는 유지했다. 적용 결과는 `.local/apply-close-after-focus-20261012.json`이다.
+
+## 선택 에이전트 폴더에서 Neovim 실행 (2026-10-12)
+
+대시보드의 `e` 키로 선택 실행의 ID·세대를 담은 Neovim 조작을 요청한다. 호스트 어댑터가 대상 pane의 현재 cwd를 조회한 뒤 실행 세대를 다시 검증하고 대시보드 세션에 `nvim .` floating pane을 생성한다. pane cwd가 제공되지 않으면 검증된 에이전트의 cwd를 사용한다. 요청 접수·결과 계약으로 중복 요청은 기존 pane ID를 반환하며, 실행 오류는 대시보드에 표시한다. Neovim 종료 시 편집기 pane은 닫히고 대시보드는 유지된다.
+
+포맷·네이티브/WASI Clippy·스크립트 구문 검사, 코어 30개·호스트 50개 테스트와 release host/WASM 빌드를 통과했다. 수동 성능 테스트 1개는 제외했다. 전체 `scripts/smoke.py`를 임시 세션 두 개에서 통과했다. 다른 세션의 에이전트를 선택해 실제 `e` 입력, 대시보드 세션의 floating pane 생성, 대상 pane cwd 일치, Neovim 내부 `getcwd()` 기록, 같은 요청 재전송 시 pane 재사용, `:qa!` 종료 후 대시보드 복귀를 확인했다. 나머지 이동·lazygit·출처 전환·멀티 클라이언트·reload·SQLite 회귀 검사도 통과했다. 결과는 `.local/smoke-9e6b6c77a8/result.json`, 로그는 `.local/smoke-neovim-20261012-pass.log`다. 초기 실행의 화면 경로 출력 검사와 다음 실행의 lazygit cwd 검사는 실패했으며 통과 기록에 포함하지 않는다. Neovim은 파일로 작업 경로를 확인하도록, lazygit은 시작 후 저장소 루트로 cwd를 바꾸는 동작을 허용하도록 검사 조건을 보완했다. Neovim 미설치 환경의 오류 UI는 이번 실제 검증 범위에 포함하지 않는다. 임시 세션은 정리했다.
+
+최신 host/WASM을 설치하고 dist와 설치 파일의 SHA-256 일치를 확인했다. 실행 중인 `운영`, `study`, `loop`, `wiki`, `zellij-with-code-agent` 다섯 세션의 collector를 모두 reload해 권한·오류 없음·revision 응답과 기존 plugin ID 유지·중복 없음까지 확인했다. 적용 시 열려 있던 대시보드 화면은 없었다. 임시 연결 클라이언트는 종료했고 기존 연결은 유지했다. 적용 결과는 `.local/apply-neovim-20261012.json`이다.
+
+
+## 2026-10-13 새 에이전트 경로에 따른 세션·탭 선택
+
+`n`의 `Launch` 요청을 호스트에서 처리할 때 실행 중 세션 전체의 terminal pane 현재 cwd를 조회한다. 선택 경로와 cwd는 canonicalize 후 정확히 비교한다. 같은 세션·탭의 여러 pane은 하나의 후보로 합치고, 요청한 대시보드 세션의 후보를 우선한다. 후보가 없거나 우선 적용 후에도 여러 탭이 남으면 오류를 반환한다. 선택한 세션 실행 세대를 다시 검사하고 생성 직전에 해당 탭에 일치하는 cwd가 남아 있는지 재조회한다. 새 pane에는 stable tab ID를 `--tab-id`로 전달한다. 상태 저장 구조와 스키마는 변경하지 않았다.
+
+Zellij 0.45.0의 설치된 `new-pane --help`에서 `--tab-id` 지원을 확인했다. `bash scripts/check.sh`에서 코어 30개, 호스트 51개 테스트를 통과했고 기존 호스트 테스트 1개는 ignored다. 포맷, 네이티브/WASI Clippy와 구문 검사를 통과했다. `bash scripts/build.sh`로 최종 host와 WASM을 빌드하고 `bash scripts/install.sh`로 설치했다.
+
+전체 임시 세션 smoke는 `.local/smoke-b5fbd8f39b/result.json`에 기록했다. 요청 세션과 다른 세션의 비활성 탭에 선택 경로가 열려 있는 경우 해당 탭에 생성되는지, 대상 없는 경로 오류, 요청 재사용, 생성 프로세스 발견과 화면·입력·종료, collector detach/reload와 대시보드 재열기를 확인했다. 생성 직전 경로 재조회 보강 후 최종 빌드는 별도 임시 세션에서 다른 세션·비활성 탭, 심볼릭 링크 경로, 호출자 세션·pane 환경 상속, 중복 요청, 여러 일치 탭과 대상 없음 오류를 검증했다. 결과는 `.local/route-0019e3c051/result.json`에 기록했고 생성한 임시 세션은 종료했다.
+
+사용자의 전체 세션 reload 요청에 따라 실행 중인 `운영`, `study`, `wiki`, `zellij-with-code-agent`, `loop`, `hermes` 6개 세션의 `agent-dashboard` collector를 `start-or-reload-plugin`으로 reload했다. 당시 열린 대시보드는 없었다. 연결된 클라이언트가 없는 세션에는 임시 클라이언트를 attach한 뒤 reload하고 분리했다. 각 세션에서 permissions, 상태 revision, 오류 없음, reload 후 poll 증가를 확인했다. 종료된 smoke 세션은 복원하지 않았다. 적용 기록은 `.local/reload-all-dashboard-result.json`에 남겼다.

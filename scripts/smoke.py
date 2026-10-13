@@ -302,11 +302,26 @@ fn main() {
                                                      env=action_environment, text=True))
         command_dir = directory / "명령 검증"
         command_dir.mkdir()
-        epoch = next(a["identity"]["session_epoch"] for a in rows if a["identity"]["session_name"] == first)
-        launch_request = {"request_id": "adapter-launch", "action": {"kind": "launch", "session": first,
+        # The requested session differs from the path's session; its tab is inactive.
+        call(first, "action", "new-tab", "--name", "launch-destination", "--cwd", str(command_dir))
+        destination = next(p for p in json.loads(call(first, "action", "list-panes", "--all", "--json"))
+                           if p.get("pane_cwd") == str(command_dir) and not p["is_plugin"])
+        call(first, "action", "go-to-tab", "1")
+        epoch = next(a["identity"]["session_epoch"] for a in rows if a["identity"]["session_name"] == sessions[1])
+        launch_request = {"request_id": "adapter-launch", "action": {"kind": "launch", "session": sessions[1],
                           "epoch": epoch, "cwd": str(command_dir), "tool": "codex"}}
         launched = host_action(launch_request)
         assert launched["state"] == "succeeded", launched
+        created = next(p for p in json.loads(call(first, "action", "list-panes", "--all", "--json"))
+                       if not p["is_plugin"] and p["id"] == launched["pane_id"])
+        assert created["tab_id"] == destination["tab_id"], (created, destination)
+        print("PASS launch routes by directory to another session and inactive tab", flush=True)
+        missing_dir = directory / "unopened"
+        missing_dir.mkdir()
+        missing = host_action({"request_id": "launch-missing-path", "action": {
+            **launch_request["action"], "cwd": str(missing_dir)}})
+        assert missing["state"] != "succeeded" and "찾을 수 없습니다" in missing["message"], missing
+
         assert host_action(launch_request)["pane_id"] == launched["pane_id"]
         def launched_agent():
             host_call("scan")
@@ -344,7 +359,14 @@ fn main() {
         os.write(clients[0].fd, b"\t")
         wait_for("Tab wraps to pinned working agent", lambda: any(p["query"] == first and p["pinned_panel"]
                  and p["selected_id"] == agent["identity"]["agent_id"] for p in ping(first, "dashboard")))
-        call(first, "action", "close-pane", "--pane-id", tab_ui)
+        os.write(clients[0].fd, b"\r")
+        wait_for("Enter focuses same-session agent and closes dashboard", lambda: any(
+            p["id"] == agent["identity"]["pane_id"] and not p["is_plugin"] and p["is_focused"]
+            for p in json.loads(call(first, "action", "list-panes", "--all", "--json"))) and not any(
+            p["is_plugin"] and f'plugin_{p["id"]}' == tab_ui
+            for p in json.loads(call(first, "action", "list-panes", "--json"))))
+        wait_for("collector survives dashboard navigation", lambda: any(
+            p["permissions"] and p["revision"] is not None for p in ping(first)))
         # Only these two owned agents are pinned in this isolated state.
         host_call("pin", screen_row["identity"]["agent_id"], "true")
         call(first, "action", "focus-pane-id", fixture_pane)
@@ -435,6 +457,38 @@ fn main() {
                     if not p["is_plugin"] and p["title"] == "lazygit"]
         target_pane = next(p for p in json.loads(call(sessions[1], "action", "list-panes", "--all", "--json"))
                            if not p["is_plugin"] and p["id"] == target["identity"]["pane_id"])
+        def neovim_panes(session):
+            return [p for p in json.loads(call(session, "action", "list-panes", "--all", "--json"))
+                    if not p["is_plugin"] and p["title"] == "Neovim"]
+        os.write(clients[0].fd, b"e")
+        nvim_pane = wait_for("e opens Neovim in dashboard session", lambda: next(iter(neovim_panes(first)), None))
+        assert nvim_pane["is_floating"]
+        assert not neovim_panes(sessions[1])
+        assert Path(nvim_pane["pane_cwd"]).resolve() == Path(target_pane["pane_cwd"]).resolve()
+        nvim_result = next(r for r in host_call("requests") if r["request"]["action"]["kind"] == "neovim")
+        assert nvim_result["state"] == "succeeded"
+        assert nvim_result["request"]["action"]["target"] == target["identity"]
+        assert host_call("action", json.dumps(nvim_result["request"]))["pane_id"] == nvim_result["pane_id"]
+        assert len(neovim_panes(first)) == 1
+        wait_for("Neovim renders editor", lambda: call(
+            first, "action", "dump-screen", "--pane-id", f'terminal_{nvim_pane["id"]}').strip())
+        call(first, "action", "write", "--pane-id", f'terminal_{nvim_pane["id"]}', "27")
+        call(first, "action", "write-chars", "--pane-id", f'terminal_{nvim_pane["id"]}',
+             ":call writefile([getcwd()], 'neovim-cwd.txt')")
+        call(first, "action", "write", "--pane-id", f'terminal_{nvim_pane["id"]}', "13")
+        def neovim_directory_confirmed():
+            (directory / "neovim-screen.log").write_text(call(
+                first, "action", "dump-screen", "--pane-id", f'terminal_{nvim_pane["id"]}'))
+            cwd_file = Path(target_pane["pane_cwd"]) / "neovim-cwd.txt"
+            return cwd_file.exists() and Path(cwd_file.read_text().strip()).resolve() == Path(target_pane["pane_cwd"]).resolve()
+        wait_for("Neovim confirms selected directory", neovim_directory_confirmed)
+        call(first, "action", "write", "--pane-id", f'terminal_{nvim_pane["id"]}', "27")
+        call(first, "action", "write-chars", "--pane-id", f'terminal_{nvim_pane["id"]}', ":qa!")
+        call(first, "action", "write", "--pane-id", f'terminal_{nvim_pane["id"]}', "13")
+        wait_for("quitting Neovim closes floating pane", lambda: not neovim_panes(first))
+        wait_for("dashboard remains after Neovim", lambda: any(
+            p["menu"] is None and p["selected_id"] == target["identity"]["agent_id"]
+            for p in ping(first, "dashboard")))
         os.write(clients[0].fd, b"gg")
         git_pane = wait_for("gg opens lazygit in dashboard session", lambda: next(iter(lazygit_panes(first)), None))
         assert git_pane["is_floating"], git_pane
@@ -443,7 +497,12 @@ fn main() {
         assert git_result["state"] == "succeeded", git_result
         assert git_result["request"]["action"]["session"] == first
         assert git_result["request"]["action"]["target"] == target["identity"]
-        assert Path(git_pane["pane_cwd"]).resolve() == Path(target_pane["pane_cwd"]).resolve(), git_pane
+        git_root = subprocess.check_output(
+            ["git", "-C", target_pane["pane_cwd"], "rev-parse", "--show-toplevel"], text=True).strip()
+        # Lazygit can change its own cwd to the repository root during startup.
+        assert Path(git_pane["pane_cwd"]).resolve() in {
+            Path(target_pane["pane_cwd"]).resolve(), Path(git_root).resolve()
+        }, git_pane
         assert host_call("action", json.dumps(git_result["request"]))["pane_id"] == git_result["pane_id"]
         assert len(lazygit_panes(first)) == 1
         call(first, "action", "write-chars", "--pane-id", f'terminal_{git_pane["id"]}', "q")
@@ -477,7 +536,9 @@ fn main() {
                  and any(row[1] == f'terminal_{target["identity"]["pane_id"]}' for row in attached(sessions[1])))
         clients.append(Client([zellij, "attach", first], directory))
         wait_for("collector available after focus", lambda: any(p["permissions"] for p in ping(first)))
-        call(first, "action", "close-pane", "--pane-id", focus_ui)
+        wait_for("cross-session navigation closes source dashboard", lambda: not any(
+            p["is_plugin"] and f'plugin_{p["id"]}' == focus_ui
+            for p in json.loads(call(first, "action", "list-panes", "--json"))))
         # Pin after keyboard focus checks: pinning moves the row to the other panel.
         host_call("pin", target["identity"]["agent_id"], "true")
         row = next(a for a in rows if a["identity"]["session_name"] == first)
