@@ -1,5 +1,13 @@
 # 실행 검증 기록
 
+## 2026-10-14 Alt w로 working 전체 순환
+
+기존 `working-only` 필터를 전역 `Alt w`에 연결했다. 고정 여부와 관계없이 정확히 `working` 상태인 실행만 순환하며 `waiting`, `compact`, `done`, `idle`은 포함하지 않는다. 새 도메인 상태나 저장 필드는 추가하지 않았다. README 키 표와 기능 이관표를 갱신하고 사용자 `/Users/in05908_mac/.config/zellij/config.kdl`의 `shared_except "locked"`에 `mode=collector`, `name=agent-next`, `payload=working-only` 바인딩을 추가했다. `zellij setup --check`에서 설정 문법을 확인했다. 기존 설정 백업은 `.local/working-next-config-before.kdl`이다.
+
+`bash scripts/check.sh`에서 코어 33개·호스트 55개 테스트, 포맷, native/WASI Clippy와 스크립트 검사를 통과했다. 수동 성능 테스트 1개는 제외했다. `bash scripts/build.sh` 후 `python3 scripts/smoke.py`를 통과했다. 소유한 임시 세션에서 실제 Alt w 키로 다음 working pane 이동, working-only의 idle 제외와 고정 해제된 working 실행 선택을 확인했다. 결과는 `.local/smoke-53e4dc3f63/result.json`, 로그는 `.local/working-next-smoke.log`다. 임시 세션은 종료했다.
+
+`bash scripts/install.sh` 후 앞서 사용자가 지정한 전체 운영 세션 `study`, `zellij-with-code-agent`, `loop`, `hermes`, `운영`의 기존 collector ID 0을 reload했다. 재시작된 인스턴스의 permissions=true·error=null과 polls/revision 증가를 확인했고, 설치본 host/WASM과 dist의 SHA-256 일치를 확인했다. 열린 대시보드는 없었다. 검증용 임시 연결은 정리했으며 적용 결과는 `.local/apply-working-next-all.json`, 로그는 `.local/apply-working-next-all.log`다.
+
 ## 2026-10-14 메모리 누적과 외부 명령 자원 회수
 
 외부 명령을 별도 프로세스 그룹으로 실행하고 오류 시 그룹 종료·직접 자식 회수·nonblocking 출력 읽기 취소·스레드 join을 수행하도록 수정했다. collector 탐색 큐는 대기 32건으로 제한하고 초과 키는 버린다. 종료 실행 이력은 최대 24시간·256건으로 정리하며 UI 스냅샷에서 ended/gone 실행을 제외한다. 저장 필드와 Store/스냅샷 3·DB 구조 2·이벤트 1은 유지한다.

@@ -140,6 +140,15 @@ show_release_notes false
                 payload "idle-and-pinned"
             }}
         }}
+        bind "Alt w" {{
+            MessagePlugin "{plugin_url}" {{
+                mode "collector"
+                host_path "{host_path}"
+                state_dir "{state_path}"
+                name "agent-next"
+                payload "working-only"
+            }}
+        }}
     }}
 }}
 load_plugins {{
@@ -373,6 +382,14 @@ fn main() {
         def client_panes(session):
             return {int(line.split()[0]): line.split()[1] for line in call(session, "action", "list-clients").splitlines()
                     if re.match(r"^\d+\s+", line)}
+        # Both fixtures are pinned in this isolated state. Start at the earlier
+        # pane so the next working candidate stays within the owned session.
+        working_fixtures = sorted([agent, screen_row], key=lambda a: a["identity"]["pane_id"])
+        call(first, "action", "focus-pane-id", f'terminal_{working_fixtures[0]["identity"]["pane_id"]}')
+        os.write(clients[0].fd, b"\x1bw")
+        wait_for("Alt w selects next working agent", lambda: client_panes(first).get(tab_client)
+                 == f'terminal_{working_fixtures[1]["identity"]["pane_id"]}')
+        call(first, "action", "focus-pane-id", fixture_pane)
         before_navigation = client_panes(first)
         os.write(clients[0].fd, b"\x1bu")
         wait_for("global agent-next works without dashboard", lambda: client_panes(first).get(tab_client) == f'terminal_{screen_row["identity"]["pane_id"]}')
@@ -418,6 +435,10 @@ fn main() {
             if next_filter == "idle-and-unpinned":
                 assert next_row["status"] == "idle"
         print("PASS host next unpinned and idle-unpinned filters", flush=True)
+        working_row = host_call("next", json.dumps({"filter": "working-only", "session": first,
+                                                   "pane_id": agent["identity"]["pane_id"]}))
+        assert working_row and working_row["status"] == "working"
+        print("PASS working-only skips idle and includes unpinned agents", flush=True)
         before_messages = max(p["next_messages"] for p in ping(first))
         before_navigation = client_panes(first)
         os.write(clients[0].fd, b"\x1bu")

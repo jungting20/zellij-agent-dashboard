@@ -12,7 +12,7 @@
 | 부모와 자식 계층 | `hierarchy.go` | M2 |
 | 숫자 선택, 방향키, j/k, 새로고침 | `model.go`, `R` | M2 |
 | 선택 에이전트 pane과 세션 이동 | `Enter` | M2 |
-| 전역 필터별 다음 에이전트 이동 | `Alt u/i/o/p`, `agent-next` | 추가 구현 |
+| 전역 필터별 다음 에이전트 이동 | `Alt u/i/o/p/w`, `agent-next` | 추가 구현 |
 | working 에이전트 순환 선택 | 대시보드 `Tab` | 추가 구현 |
 | 검색과 마지막 보고 시점 표시 | 새 개선 기능 | M2 |
 | 고정과 해제 | `Space` | M3 |

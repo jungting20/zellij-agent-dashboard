@@ -98,8 +98,9 @@ load_plugins {
 | `Alt i` | `idle-and-pinned` | idle이면서 고정 |
 | `Alt o` | `unpinned-only` | 일반 |
 | `Alt p` | `idle-and-unpinned` | idle이면서 일반 |
+| `Alt w` | `working-only` | working 전체 · 고정 여부 무관 |
 
-`all`과 `working-only` payload도 지원한다. 대상 지정 없이 브로드캐스트한 `agent-next`는 무시하고 collector를 지정한 private 메시지만 처리한다. 화면 인스턴스는 이동 요청을 처리하지 않는다. Zellij 0.45.0의 키 메시지는 여러 클라이언트 인스턴스로 전달되므로 연결된 최소 ID 클라이언트만 처리하고 다른 인스턴스는 요청을 버린다. 다중 클라이언트에서는 처리 클라이언트의 초점만 이동하며, 키를 누른 클라이언트 식별자는 메시지 계약에 없다. 연속 키는 순서대로 처리한다. 설정 변경은 새 세션부터 적용하며 실행 중 세션에 설치·reload할 때는 대상을 명시한다.
+`Alt w`는 고정·일반 패널 모두에서 정확히 `working` 상태인 실행만 순환하며 `waiting`, `compact`, `done`, `idle`은 제외한다. `all` payload도 지원한다. 대상 지정 없이 브로드캐스트한 `agent-next`는 무시하고 collector를 지정한 private 메시지만 처리한다. 화면 인스턴스는 이동 요청을 처리하지 않는다. Zellij 0.45.0의 키 메시지는 여러 클라이언트 인스턴스로 전달되므로 연결된 최소 ID 클라이언트만 처리하고 다른 인스턴스는 요청을 버린다. 다중 클라이언트에서는 처리 클라이언트의 초점만 이동하며, 키를 누른 클라이언트 식별자는 메시지 계약에 없다. 연속 키는 순서대로 처리한다. 활성 config.kdl의 키바인딩 변경은 파일 감시로 실행 중 세션에도 반영된다. 플러그인 별칭 위치 변경은 세션 재시작이 필요하며 설치·reload할 때는 대상을 명시한다.
 
 Claude, Codex, Cursor CLI(`agent`), Gemini(`agy`/`gemini`), Hermes와 Pi(`pi` 또는 Node의 `pi-coding-agent`) 발견 코드를 제공한다. 도구별 실제 검증 범위는 기능 이관표를 따른다. 상세 훅 어댑터는 현재 Claude만 제공한다. Claude, Codex, Gemini, Cursor는 훅이 없으면 화면 규칙으로 상태를 판별한다. Hermes와 Pi는 화면 규칙이 없어 `found`로 표시한다. 훅 없는 경로 정보는 프로세스가 상속한 `PWD`나 확인한 pane 메타데이터를 사용한다.
 
