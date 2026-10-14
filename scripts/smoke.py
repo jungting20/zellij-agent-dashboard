@@ -146,7 +146,7 @@ show_release_notes false
                 host_path "{host_path}"
                 state_dir "{state_path}"
                 name "agent-next"
-                payload "working-only"
+                payload "non-idle"
             }}
         }}
     }}
@@ -410,6 +410,19 @@ fn main() {
         call(first, "action", "focus-pane-id", f'terminal_{screen_row["identity"]["pane_id"]}')
         os.write(clients[0].fd, b"\x1bi")
         wait_for("global idle-and-pinned skips working agent", lambda: client_panes(first).get(tab_client) == fixture_pane)
+        show_fixture(":waiting")
+        wait_for("waiting fixture for non-idle navigation", lambda: current_screen_row()["status"] == "waiting")
+        # A non-agent anchor starts at the first pinned match. Starting at the
+        # idle row would wrap into agents discovered in unrelated real sessions.
+        non_agent_pane = next(p for p in json.loads(call(first, "action", "list-panes", "--json"))
+                              if not p["is_plugin"] and p["id"] not in
+                              {agent["identity"]["pane_id"], screen_row["identity"]["pane_id"]})
+        call(first, "action", "focus-pane-id", f'terminal_{non_agent_pane["id"]}')
+        os.write(clients[0].fd, b"\x1bw")
+        wait_for("Alt w includes waiting with an idle peer", lambda: client_panes(first).get(tab_client)
+                 == f'terminal_{screen_row["identity"]["pane_id"]}')
+        show_fixture(":working")
+        wait_for("restore working fixture after non-idle navigation", lambda: current_screen_row()["status"] == "working")
         other_agent = next(a for a in rows if a["identity"]["session_name"] == sessions[1])
         host_call("pin", other_agent["identity"]["agent_id"], "true")
         host_call("pin", agent["identity"]["agent_id"], "false")
@@ -658,7 +671,7 @@ fn main() {
         os.write(clients[-1].fd, b"\x1bu")
         wait_for("global agent-next crosses sessions after detach and reload", lambda: len(attached(first)) < source_clients
                  and any(row[1] == f'terminal_{target["identity"]["pane_id"]}' for row in attached(sessions[1])))
-        (directory / "result.json").write_text(json.dumps({"passed":True, "sessions":sessions, "real_claude":args.real_claude, "screen_adapter":True, "sqlite_repository":True, "legacy_import":True, "pane_presence":True, "agent_next":True, "working_tab":True}, indent=2))
+        (directory / "result.json").write_text(json.dumps({"passed":True, "sessions":sessions, "real_claude":args.real_claude, "screen_adapter":True, "sqlite_repository":True, "legacy_import":True, "pane_presence":True, "agent_next":True, "working_tab":True, "non_idle_next":True}, indent=2))
         print(f"Artifacts: {directory}", flush=True)
     finally:
         for fixture in background_fixtures:

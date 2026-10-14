@@ -39,6 +39,7 @@ pub enum NextFilter {
     UnpinnedOnly,
     IdleAndUnpinned,
     WorkingOnly,
+    NonIdle,
 }
 
 impl NextFilter {
@@ -50,6 +51,7 @@ impl NextFilter {
             "unpinned-only" => Ok(Self::UnpinnedOnly),
             "idle-and-unpinned" => Ok(Self::IdleAndUnpinned),
             "working-only" => Ok(Self::WorkingOnly),
+            "non-idle" => Ok(Self::NonIdle),
             _ => Err(format!("unknown agent-next filter: {payload}")),
         }
     }
@@ -64,6 +66,7 @@ impl NextFilter {
                 Self::UnpinnedOnly => !pinned,
                 Self::IdleAndUnpinned => !pinned && agent.status == Status::Idle,
                 Self::WorkingOnly => agent.status == Status::Working,
+                Self::NonIdle => agent.status != Status::Idle,
             }
     }
 }

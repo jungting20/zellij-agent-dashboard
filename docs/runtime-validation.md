@@ -1,5 +1,15 @@
 # 실행 검증 기록
 
+## 2026-10-14 Alt w의 idle 제외 필터
+
+전역 이동에 `non-idle` 필터를 추가했다. 표시 가능하고 생존이 확인된 실행 중 `idle`만 제외하며 `working`, `waiting`, `compact`, `done`, `failed`, `found`를 포함한다. `working-only`와 대시보드 `Tab`은 기존 working 전용 동작을 유지한다. 저장 구조와 버전은 바뀌지 않는다.
+
+`bash scripts/check.sh`에서 코어 34개·호스트 55개 테스트, 포맷, native/WASI Clippy와 스크립트 검사를 통과했다(수동 성능 테스트 1개 제외). 새 코어 검사는 모든 비-idle 상태, 고정 여부, 순환과 idle만 남았을 때 빈 결과, 종료·부재·생존 미확인 실행 제외를 확인한다. 샌드박스 안에서는 기존 프로세스 조회 테스트가 실패하여 권한을 허용한 환경에서 재실행했다. 로그는 `.local/non-idle-check.log`다.
+
+`python3 scripts/smoke.py`를 통과했다. 실제 Alt w로 working·waiting pane 이동과 기존 Tab·idle 필터·멀티 클라이언트·detach/reload 후 세션 간 이동을 확인했다. 결과는 `.local/smoke-9071d9f039/result.json`, 로그는 `.local/non-idle-smoke.log`다. 첫 시도는 기존 화면 idle 확인 단계에서 시간 초과했고, 두 번째는 전역 탐색의 테스트 시작 위치가 다른 세션으로 순환하여 실패했다. 비에이전트 pane에서 탐색을 시작하도록 테스트를 수정한 뒤 통과했다. 소유한 임시 세션은 종료했다.
+
+검증 후 `bash scripts/build.sh`와 `bash scripts/install.sh`를 실행했다. 승인받은 운영 세션 `study`, `zellij-with-code-agent`, `loop`, `hermes`, `운영`의 기존 collector ID 0을 reload하고 설치본 host/WASM과 dist의 SHA-256 일치, permissions=true·error=null과 polls/revision 증가를 확인했다. 열린 대시보드는 없었다. `zellij-with-code-agent`에서는 임시 클라이언트의 초기 조회가 완료되지 않아 첫 검증이 시간 초과했고, 재실행에서 기존 연결 클라이언트의 reload 후 정상 수집을 확인했다. 적용 결과는 `.local/apply-non-idle-all.json`, 재확인 결과는 `.local/retry-non-idle.json`이다. `/Users/in05908_mac/.config/zellij/config.kdl`에서 Alt w의 payload를 `working-only`→`non-idle`로 변경하고 `zellij setup --check`를 통과했다. 설정 원본은 `.local/non-idle-config-before.kdl`에 보존했다.
+
 ## 2026-10-14 Alt w로 working 전체 순환
 
 기존 `working-only` 필터를 전역 `Alt w`에 연결했다. 고정 여부와 관계없이 정확히 `working` 상태인 실행만 순환하며 `waiting`, `compact`, `done`, `idle`은 포함하지 않는다. 새 도메인 상태나 저장 필드는 추가하지 않았다. README 키 표와 기능 이관표를 갱신하고 사용자 `/Users/in05908_mac/.config/zellij/config.kdl`의 `shared_except "locked"`에 `mode=collector`, `name=agent-next`, `payload=working-only` 바인딩을 추가했다. `zellij setup --check`에서 설정 문법을 확인했다. 기존 설정 백업은 `.local/working-next-config-before.kdl`이다.

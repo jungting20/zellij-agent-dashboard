@@ -919,6 +919,55 @@ mod tests {
         );
         assert!(F::parse("unexpected").is_err());
         assert_eq!(F::parse("working-only").unwrap(), F::WorkingOnly);
+        assert_eq!(F::parse("non-idle").unwrap(), F::NonIdle);
+    }
+
+    #[test]
+    fn non_idle_cycle_includes_every_other_status_and_skips_unavailable_panes() {
+        let mut snapshot = populated();
+        snapshot.agents.truncate(2);
+        snapshot.agents[0].status = Status::Idle;
+        let idle = snapshot.agents[0].identity.agent_id.clone();
+        let target = snapshot.agents[1].identity.agent_id.clone();
+        let view = View::default();
+        use crate::NextFilter as F;
+        for status in [
+            Status::Failed,
+            Status::Waiting,
+            Status::Done,
+            Status::Compact,
+            Status::Working,
+            Status::Found,
+        ] {
+            snapshot.agents[1].status = status;
+            for pinned in [false, true] {
+                snapshot.agents[1].pinned = pinned;
+                for anchor in [&idle, &target] {
+                    assert_eq!(
+                        view.next_agent(&snapshot, F::NonIdle, Some(anchor))
+                            .unwrap()
+                            .identity
+                            .agent_id,
+                        target
+                    );
+                }
+            }
+        }
+        snapshot.agents[1].liveness = Liveness::Unverified;
+        assert!(view.next_agent(&snapshot, F::NonIdle, None).is_none());
+        snapshot.agents[1].liveness = Liveness::Gone;
+        assert!(view.next_agent(&snapshot, F::NonIdle, None).is_none());
+        snapshot.agents[1].liveness = Liveness::Live;
+        snapshot.agents[1].pane.presence = crate::PanePresence::Missing;
+        assert!(view.next_agent(&snapshot, F::NonIdle, None).is_none());
+        snapshot.agents[1].pane.presence = crate::PanePresence::Present;
+        snapshot.agents[1].ended = true;
+        assert!(view.next_agent(&snapshot, F::NonIdle, None).is_none());
+        snapshot.agents[1].ended = false;
+        snapshot.agents[1].status = Status::Idle;
+        assert!(view
+            .next_agent(&snapshot, F::NonIdle, Some(&idle))
+            .is_none());
     }
 
     #[test]
