@@ -2,9 +2,13 @@ use std::{
     ffi::OsString,
     fmt,
     io::Read,
+    os::unix::{io::AsRawFd, process::CommandExt},
     path::PathBuf,
     process::{Command, Stdio},
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -73,10 +77,29 @@ enum ReadEvent {
     Error(CommandError),
 }
 
-fn drain(mut pipe: impl Read, stdout: bool, limit: usize, sender: mpsc::Sender<ReadEvent>) {
+fn drain(
+    mut pipe: impl Read + AsRawFd,
+    stdout: bool,
+    limit: usize,
+    sender: mpsc::Sender<ReadEvent>,
+    stop: Arc<AtomicBool>,
+) {
+    // SAFETY: pipe owns a live descriptor; F_GETFL/F_SETFL only change its flags.
+    let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0
+        || unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+    {
+        let _ = sender.send(ReadEvent::Error(CommandError::Execution(
+            std::io::Error::last_os_error().to_string(),
+        )));
+        return;
+    }
     let mut bytes = Vec::new();
     let mut buffer = [0; 8192];
     loop {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
         match pipe.read(&mut buffer) {
             Ok(0) => {
                 let _ = sender.send(ReadEvent::Finished(stdout, bytes));
@@ -88,6 +111,9 @@ fn drain(mut pipe: impl Read, stdout: bool, limit: usize, sender: mpsc::Sender<R
             }
             Ok(n) => bytes.extend_from_slice(&buffer[..n]),
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5))
+            }
             Err(e) => {
                 let _ = sender.send(ReadEvent::Error(CommandError::Execution(e.to_string())));
                 return;
@@ -99,7 +125,10 @@ fn drain(mut pipe: impl Read, stdout: bool, limit: usize, sender: mpsc::Sender<R
 impl CommandRunner for SystemCommandRunner {
     fn run(&self, spec: &CommandSpec) -> Result<CommandOutput, CommandError> {
         let mut command = Command::new(&spec.program);
-        command.args(&spec.args).stdin(Stdio::null());
+        command
+            .args(&spec.args)
+            .stdin(Stdio::null())
+            .process_group(0);
         if let Some(cwd) = &spec.cwd {
             command.current_dir(cwd);
         }
@@ -122,13 +151,21 @@ impl CommandRunner for SystemCommandRunner {
             .spawn()
             .map_err(|e| CommandError::Execution(e.to_string()))?;
         let (sender, receiver) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut readers = Vec::new();
         if spec.capture {
             let stdout = child.stdout.take().expect("piped stdout");
             let stderr = child.stderr.take().expect("piped stderr");
             let limit = spec.limit;
             let out_sender = sender.clone();
-            std::thread::spawn(move || drain(stdout, true, limit, out_sender));
-            std::thread::spawn(move || drain(stderr, false, limit, sender));
+            let out_stop = stop.clone();
+            readers.push(std::thread::spawn(move || {
+                drain(stdout, true, limit, out_sender, out_stop)
+            }));
+            let err_stop = stop.clone();
+            readers.push(std::thread::spawn(move || {
+                drain(stderr, false, limit, sender, err_stop)
+            }));
         }
         let started = Instant::now();
         let result = (|| {
@@ -167,8 +204,19 @@ impl CommandRunner for SystemCommandRunner {
             }
         })();
         if result.is_err() {
+            // SAFETY: the child was spawned into its own process group. A
+            // negative PID targets only that group, including inherited pipes.
+            unsafe {
+                libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+            }
             let _ = child.kill();
             let _ = child.wait();
+        }
+        // A descendant can escape the group and retain a pipe. Cancellation
+        // still closes our descriptors and releases buffers before returning.
+        stop.store(true, Ordering::Release);
+        for reader in readers {
+            let _ = reader.join();
         }
         result
     }
@@ -214,6 +262,65 @@ mod tests {
             SystemCommandRunner.run(&spec),
             Err(CommandError::OutputLimit)
         ));
+    }
+
+    #[test]
+    fn timeout_and_output_limit_stop_descendants_that_inherit_pipes() {
+        for output_limit in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let marker = directory.path().join("survived");
+            let script = if output_limit {
+                "(sleep 0.3; printf survived > \"$1\") & exec /usr/bin/yes"
+            } else {
+                "(sleep 0.3; printf survived > \"$1\") & wait"
+            };
+            let spec = CommandSpec::new("/bin/sh", Some(Duration::from_millis(100)), 32).args([
+                std::ffi::OsStr::new("-c"),
+                std::ffi::OsStr::new(script),
+                std::ffi::OsStr::new("audit"),
+                marker.as_os_str(),
+            ]);
+            let result = SystemCommandRunner.run(&spec);
+            assert!(matches!(
+                (&result, output_limit),
+                (Err(CommandError::OutputLimit), true) | (Err(CommandError::Timeout), false)
+            ));
+            std::thread::sleep(Duration::from_millis(400));
+            assert!(!marker.exists(), "descendant survived command cancellation");
+        }
+    }
+
+    #[test]
+    fn cancellation_releases_reader_even_when_writer_keeps_pipe_open() {
+        use std::{io::Write, os::unix::net::UnixStream};
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        writer
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        writer
+            .write_all(b"buffer retained until cancellation")
+            .unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader_stop = stop.clone();
+        let (sender, receiver) = mpsc::channel();
+        let (done, completed) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            drain(reader, true, 1024, sender, reader_stop);
+            done.send(()).unwrap();
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        stop.store(true, Ordering::Release);
+        completed.recv_timeout(Duration::from_secs(1)).unwrap();
+        handle.join().unwrap();
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+        match writer.read(&mut [0; 1]) {
+            Ok(0) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {}
+            other => panic!("reader did not close: {other:?}"),
+        }
     }
 
     #[test]

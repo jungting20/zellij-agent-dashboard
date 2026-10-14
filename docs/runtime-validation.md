@@ -1,5 +1,17 @@
 # 실행 검증 기록
 
+## 2026-10-14 메모리 누적과 외부 명령 자원 회수
+
+외부 명령을 별도 프로세스 그룹으로 실행하고 오류 시 그룹 종료·직접 자식 회수·nonblocking 출력 읽기 취소·스레드 join을 수행하도록 수정했다. collector 탐색 큐는 대기 32건으로 제한하고 초과 키는 버린다. 종료 실행 이력은 최대 24시간·256건으로 정리하며 UI 스냅샷에서 ended/gone 실행을 제외한다. 저장 필드와 Store/스냅샷 3·DB 구조 2·이벤트 1은 유지한다.
+
+`bash scripts/check.sh`에서 코어 33개·호스트 55개 테스트와 포맷, native/WASI Clippy, 스크립트 검사를 통과했다. 수동 성능 테스트 1개는 제외했다. 타임아웃·출력 한도 발생 후 하위 프로세스 종료, writer가 열린 상태의 읽기 스레드 취소, 큐 초과 10,000회·FIFO·복구, 종료 이력 상한·TTL·살아 있는 실행 보존을 검증했다. 임시 재현 프로그램에서 타임아웃 6회 후 FD가 수정 전 4→16개였고 수정 후 4→4개로 유지됐다. 로그는 `.local/memory-check.log`, `.local/memory-fd-audit.log`다.
+
+`python3 scripts/smoke.py`를 통과했다. 임시 세션 `zad-smoke-01a6a031ec`, `zad renamed 01a6a031ec`에서 상태 감지·세션 이름 변경·중복 조작·멀티 클라이언트·detach·reload·탐색을 검증하고 종료한 실행이 UI 스냅샷에 포함되지 않는 검사를 추가했다. 결과는 `.local/smoke-01a6a031ec/result.json`, 로그는 `.local/memory-smoke.log`다. 임시 세션은 종료했다.
+
+검증 후 `bash scripts/build.sh`와 `bash scripts/install.sh`를 실행했다. 설치본 host/WASM과 dist의 SHA-256 일치를 확인했다. 설치본을 사용하는 임시 세션 `zad-memory-d806ddadf9`에서 호스트 탐색 응답을 4초 지연하고 실제 탐색 키 200개를 보내 대기 큐 상한 32건, 지연 해제 후 큐 소진, collector reload, 대시보드 열기와 상태 조회를 확인했다. 최초 설치본 reload 검사는 권한 승인 대기로 시간 초과했고, 새 임시 세션에서 권한을 승인한 뒤 재검증해 통과했다. 결과는 `.local/memory-runtime-d806ddadf9/result.json`, 로그는 `.local/memory-runtime.log`다. 임시 세션은 종료했다. 사용자가 지정한 운영 `loop` 세션에 설치본을 반영했다. 열린 대시보드는 없었으며 임시 클라이언트를 연결해 기존 alias `agent-dashboard`, 설정 `mode=collector`, plugin ID 0을 유지하여 reload했다. 재시작된 인스턴스의 polls 2→8, revision 1126744→1126763, permissions=true, error=null과 collector 숨김을 확인했다. 새 pane 생성 없이 반영했으며 검증용 클라이언트 연결을 정리했다. 적용 결과는 `.local/apply-memory-loop.json`, 로그는 `.local/apply-memory-loop.log`다.
+
+추가 사용자 요청에 따라 당시 실행 중인 전체 5개 세션 `study`, `loop`, `zellij-with-code-agent`, `hermes`, `운영`에도 같은 설치본을 적용했다. 각 세션의 기존 collector ID 0과 alias/configuration을 유지해 reload하고, 재시작 후 polls와 revision 증가·permissions=true·error=null·숨김 상태를 확인했다. 열린 대시보드는 없었으며 새 pane은 생성하지 않았다. `hermes`와 `운영`은 최초 연결 직후 ping이 시간 초과됐으나 응답 대기를 포함해 재시도하여 반영과 상태 갱신을 확인했다. 검증용 임시 클라이언트는 모두 정리했으며 기존 클라이언트는 유지했다. 종료된 세션은 되살리지 않았다. 세션별 적용 결과는 `.local/apply-memory-all.json`, 로그는 `.local/apply-memory-all.log`다.
+
 ## 2026-10-14 세션 이름 변경 후 auth 이동 복구
 
 `auth` 실행은 서버 PID 43075의 세션 이름이 `likable-glockenspiel`에서 `study`로 변경된 뒤에도 옛 이름으로 수집됐다. 서버 argv와 기존 에이전트 환경변수는 그대로인데 socket 파일은 `study`로 변경된 것을 확인했다. macOS의 `LOCAL_PEERPID`로 실제 socket의 서버 PID를 확인하고 서버 조상으로 에이전트를 연결하도록 수정했다. Linux는 `SO_PEERCRED` 경로를 구현했으며 이번 실검증은 macOS/Zellij 0.45.0이다.

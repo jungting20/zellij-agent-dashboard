@@ -570,6 +570,8 @@ fn main() {
         result = subprocess.run([str(host), "--state-dir", str(state), "resolve", row["identity"]["agent_id"]], capture_output=True)
         assert result.returncode == 1
         print("PASS stale pane identity rejected", flush=True)
+        wait_for("ended execution excluded from UI snapshot", lambda: all(
+            a["identity"] != row["identity"] for a in host_call("snapshot")["agents"]))
 
         for client in clients:
             client.stop()

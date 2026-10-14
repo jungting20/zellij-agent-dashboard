@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const SCHEMA_VERSION: u32 = 3;
 pub const EVENT_SCHEMA_VERSION: u32 = 1;
 pub const STALE_AFTER_MS: u64 = 60_000;
+pub const MAX_AGENT_HISTORY: usize = 256;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -663,18 +664,19 @@ impl Store {
                 });
         }
         // Retain a short history without letting ended processes accumulate forever.
-        let removed: Vec<_> = self
+        let mut history: Vec<_> = self
             .data
             .agents
             .iter()
-            .filter(|(_, a)| {
-                a.liveness != Liveness::Live
-                    && now_ms.saturating_sub(a.last_report_ms.unwrap_or(a.status_since_ms))
-                        >= 86_400_000
-            })
-            .map(|(id, _)| id.clone())
+            .filter(|(_, a)| a.liveness != Liveness::Live)
+            .map(|(id, a)| (a.last_report_ms.unwrap_or(a.status_since_ms), id.clone()))
             .collect();
-        for id in removed {
+        history.sort();
+        let excess = history.len().saturating_sub(MAX_AGENT_HISTORY);
+        for (index, (at, id)) in history.into_iter().enumerate() {
+            if index >= excess && now_ms.saturating_sub(at) < 86_400_000 {
+                continue;
+            }
             self.data.agents.remove(&id);
             self.changes.agents.remove(&id);
             self.changes.removed_agents.insert(id);
@@ -711,6 +713,7 @@ impl Store {
             .data
             .agents
             .values()
+            .filter(|agent| !agent.ended && agent.liveness != Liveness::Gone)
             .cloned()
             .map(|mut agent| {
                 if !verified && agent.liveness == Liveness::Live {
@@ -767,6 +770,33 @@ mod tests {
             tool: "claude".into(),
             cwd: "/project/api".into(),
         }
+    }
+
+    #[test]
+    fn history_is_bounded_without_removing_live_runs_and_snapshot_excludes_history() {
+        let mut store = Store::default();
+        for i in 0..MAX_AGENT_HISTORY + 20 {
+            store.reconcile(&[found(&format!("run-{i}"))], 1000 + i as u64);
+        }
+        assert_eq!(store.agents.len(), MAX_AGENT_HISTORY + 1);
+        assert!(!store.agents.contains_key("run-0"));
+        assert!(store.changes.removed_agents.contains("run-0"));
+        let snapshot = store.snapshot(2000);
+        assert_eq!(snapshot.agents.len(), 1);
+        assert_eq!(snapshot.agents[0].liveness, Liveness::Live);
+        assert_eq!(
+            store.snapshot(20_000).agents[0].liveness,
+            Liveness::Unverified
+        );
+
+        let many_live: Vec<_> = (0..MAX_AGENT_HISTORY + 20)
+            .map(|i| found(&format!("live-{i}")))
+            .collect();
+        store.reconcile(&many_live, 30_000);
+        assert_eq!(store.snapshot(30_000).agents.len(), many_live.len());
+        store.reconcile(&[], 86_500_000);
+        assert!(store.agents.is_empty());
+        assert!(store.snapshot(86_500_000).agents.is_empty());
     }
 
     #[test]

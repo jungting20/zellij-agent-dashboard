@@ -1,8 +1,5 @@
 use dashboard_core::{view::View, Agent, Liveness, PaneOutput, Snapshot, SCHEMA_VERSION};
-use std::{
-    collections::{BTreeMap, VecDeque},
-    path::Path,
-};
+use std::{collections::BTreeMap, path::Path};
 use zellij_tile::prelude::*;
 #[path = "controls.rs"]
 mod controls;
@@ -33,7 +30,7 @@ pub struct Dashboard {
     output_pending: bool,
     output_dirty: bool,
     pin_pending: bool,
-    next_queue: VecDeque<dashboard_core::NextFilter>,
+    next_queue: dashboard_core::NextQueue,
     next_pending: bool,
     next_check_pending: bool,
     next_origin: Option<(String, u32)>,
@@ -644,7 +641,9 @@ impl ZellijPlugin for Dashboard {
                 }
                 match dashboard_core::NextFilter::parse(message.payload.as_deref().unwrap_or("")) {
                     Ok(filter) => {
-                        self.next_queue.push_back(filter);
+                        if !self.next_queue.push_back(filter) {
+                            self.message = "Navigation queue full; extra key ignored".into();
+                        }
                         self.start_next(None);
                     }
                     Err(error) => eprintln!("{error}"),

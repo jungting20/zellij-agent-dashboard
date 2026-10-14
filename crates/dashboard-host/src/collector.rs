@@ -338,13 +338,9 @@ mod tests {
         fake.replace = true;
         let identity = fake.seed();
         let snapshot = scan(&fake.deps()).unwrap();
+        assert!(!snapshot.agents.iter().any(|a| a.identity == identity));
         assert_eq!(
-            snapshot
-                .agents
-                .iter()
-                .find(|a| a.identity == identity)
-                .unwrap()
-                .liveness,
+            fake.repository.read().unwrap().agents[&identity.agent_id].liveness,
             Liveness::Gone
         );
         let replacement = snapshot

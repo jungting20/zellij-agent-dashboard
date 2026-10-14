@@ -1,5 +1,34 @@
 use crate::{view::View, Agent, Liveness, Snapshot, Status};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
+
+pub const MAX_NEXT_QUEUE: usize = 32;
+
+/// Preserve accepted key order while bounding bursts and stalled host requests.
+#[derive(Default)]
+pub struct NextQueue(VecDeque<NextFilter>);
+
+impl NextQueue {
+    pub fn push_back(&mut self, filter: NextFilter) -> bool {
+        if self.0.len() >= MAX_NEXT_QUEUE {
+            return false;
+        }
+        self.0.push_back(filter);
+        true
+    }
+    pub fn pop_front(&mut self) -> Option<NextFilter> {
+        self.0.pop_front()
+    }
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -78,5 +107,42 @@ impl View {
             self.selected_id = Some(id);
             self.reconcile_selection(snapshot);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stalled_navigation_bounds_bursts_preserves_order_and_recovers() {
+        let mut queue = NextQueue::default();
+        for i in 0..MAX_NEXT_QUEUE {
+            assert!(queue.push_back(if i % 2 == 0 {
+                NextFilter::All
+            } else {
+                NextFilter::WorkingOnly
+            }));
+        }
+        for _ in 0..10_000 {
+            assert!(!queue.push_back(NextFilter::PinnedOnly));
+        }
+        assert_eq!(queue.len(), MAX_NEXT_QUEUE);
+        for i in 0..MAX_NEXT_QUEUE {
+            assert_eq!(
+                queue.pop_front(),
+                Some(if i % 2 == 0 {
+                    NextFilter::All
+                } else {
+                    NextFilter::WorkingOnly
+                })
+            );
+        }
+        assert!(queue.is_empty());
+        assert!(queue.push_back(NextFilter::IdleAndPinned));
+        queue.clear();
+        assert!(queue.is_empty());
+        assert!(queue.push_back(NextFilter::IdleAndUnpinned));
+        assert_eq!(queue.pop_front(), Some(NextFilter::IdleAndUnpinned));
     }
 }
