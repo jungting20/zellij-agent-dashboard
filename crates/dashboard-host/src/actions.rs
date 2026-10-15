@@ -17,9 +17,9 @@ use std::{
 };
 
 const TOOLS: &[(&str, &str)] = &[
-    ("claude", "claude"),
     ("codex", "codex"),
     ("cursor", "agent"),
+    ("claude", "claude"),
     ("gemini", "agy"),
     ("hermes", "hermes"),
     ("pi", "pi"),
