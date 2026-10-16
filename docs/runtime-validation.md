@@ -1,5 +1,13 @@
 # 실행 검증 기록
 
+## 2026-10-16 대시보드 최초 선택
+
+첫 비어 있지 않은 목록에서 현재 Zellij 세션의 첫 에이전트를 선택한다. 현재 세션의 에이전트가 없으면 전체 표시 순서의 첫 항목을 선택하며, 고정 항목이면 고정 영역으로 초점도 이동한다. 이후 상태 갱신에서는 사용자의 선택을 유지한다. 권한 승인 후 세션 목록으로 현재 세션을 확인하며, 세션 이름이 없는 ModeUpdate로 이미 확인한 이름을 지우지 않는다. 저장 구조는 변경하지 않았다.
+
+`bash scripts/check.sh`의 코어 37개·호스트 55개 테스트, 포맷·native/WASI Clippy와 스크립트 검사를 통과했다(기존 호스트 성능 테스트 1개 제외). `bash scripts/build.sh`로 release host/WASM을 빌드했다. 실제 Zellij 0.45.0 임시 세션에서 고정·일반 영역의 현재 세션 우선 선택과 현재 세션 부재 시 첫 항목 선택을 고정 snapshot 응답으로 검증했다. 결과는 `.local/initial-focus-8a7fcfb356/result.json`이며 임시 세션은 종료했다. 전체 smoke는 두 번째 임시 세션의 collector 권한 승인 대기에서 중단됐으므로 전체 회귀 통과로 기록하지 않는다(`.local/initial-focus-smoke.log`).
+
+`bash scripts/install.sh`로 설치하고 dist와 설치 host/WASM의 SHA-256 일치를 확인했다. 현재 작업 세션 `loop`의 collector만 reload해 기존 plugin ID 유지, permissions=true, error=null, 상태 revision·poll 증가를 확인했다. 열린 대시보드는 없어 다음 열기부터 적용된다. 임시 연결 클라이언트는 종료했다. 적용 결과는 `.local/apply-initial-focus-loop.json`이다.
+
 ## 2026-10-14 Alt w의 idle 제외 필터
 
 전역 이동에 `non-idle` 필터를 추가했다. 표시 가능하고 생존이 확인된 실행 중 `idle`만 제외하며 `working`, `waiting`, `compact`, `done`, `failed`, `found`를 포함한다. `working-only`와 대시보드 `Tab`은 기존 working 전용 동작을 유지한다. 저장 구조와 버전은 바뀌지 않는다.

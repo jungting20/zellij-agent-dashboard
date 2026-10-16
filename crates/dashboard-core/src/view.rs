@@ -30,6 +30,7 @@ pub struct View {
     instruction_text: String,
     instruction_at: Option<u64>,
     selections: [Option<String>; 2],
+    initial_selection_done: bool,
 }
 
 enum Row<'a> {
@@ -103,6 +104,20 @@ impl View {
     }
 
     pub fn reconcile_selection(&mut self, snapshot: &Snapshot) {
+        if !self.initial_selection_done {
+            let rows = self.rows(snapshot);
+            if let Some(agent) = rows
+                .iter()
+                .find(|a| a.identity.session_name == self.source_session)
+                .or_else(|| rows.first())
+            {
+                if self.selected_id.is_none() {
+                    self.pinned_only = hierarchy_root(snapshot, agent).pinned;
+                    self.selected_id = Some(agent.identity.agent_id.clone());
+                }
+                self.initial_selection_done = true;
+            }
+        }
         for pinned in [false, true] {
             let at = usize::from(pinned);
             let rows = self.panel_rows(snapshot, pinned);
@@ -839,6 +854,62 @@ mod tests {
     }
 
     #[test]
+    fn initial_selection_prefers_current_session_in_either_panel() {
+        for pinned in [false, true] {
+            let mut snapshot = populated();
+            let current = &mut snapshot.agents[20];
+            current.identity.session_name = "현재 세션".into();
+            current.pinned = pinned;
+            let id = current.identity.agent_id.clone();
+            let mut view = View {
+                source_session: "현재 세션".into(),
+                ..View::default()
+            };
+            view.reconcile_selection(&snapshot);
+            assert_eq!(view.selected_id.as_deref(), Some(id.as_str()));
+            assert_eq!(view.pinned_only, pinned);
+            view.select(&snapshot, 1);
+            let selected = view.selected_id.clone();
+            view.reconcile_selection(&snapshot);
+            assert_eq!(view.selected_id, selected);
+        }
+    }
+
+    #[test]
+    fn initial_selection_falls_back_to_first_visible_agent() {
+        let mut snapshot = populated();
+        snapshot.agents[20].pinned = true;
+        let mut view = View {
+            source_session: "없는 세션".into(),
+            ..View::default()
+        };
+        let first = view.rows(&snapshot)[0].identity.agent_id.clone();
+        view.reconcile_selection(&snapshot);
+        assert_eq!(view.selected_id, Some(first));
+        assert!(view.pinned_only);
+    }
+
+    #[test]
+    fn initial_selection_waits_for_agents_and_does_not_repeat() {
+        let mut view = View {
+            source_session: "현재 세션".into(),
+            ..View::default()
+        };
+        view.reconcile_selection(&crate::Store::default().snapshot(1000));
+        let mut snapshot = populated();
+        snapshot.agents[20].identity.session_name = "현재 세션".into();
+        view.reconcile_selection(&snapshot);
+        assert_eq!(
+            view.selected_id,
+            Some(snapshot.agents[20].identity.agent_id.clone())
+        );
+        view.select(&snapshot, -1);
+        let selected = view.selected_id.clone();
+        view.reconcile_selection(&snapshot);
+        assert_eq!(view.selected_id, selected);
+    }
+
+    #[test]
     fn working_cycle_crosses_panels_wraps_and_preserves_empty_selection() {
         let mut snapshot = populated();
         for a in &mut snapshot.agents {
@@ -1037,6 +1108,7 @@ mod tests {
         }
         let mut view = View::default();
         view.reconcile_selection(&snapshot);
+        view.focus_panel(&snapshot, false);
         view.select(&snapshot, 3);
         let unpinned = view.selected_id.clone();
         view.toggle_panel(&snapshot);

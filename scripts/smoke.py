@@ -258,6 +258,12 @@ fn main() {
         def discovered():
             return [a for a in host_call("snapshot")["agents"] if a["identity"]["session_name"] in sessions and a["tool"] == "codex"]
         rows = wait_for("discovery across two sessions including spaces", lambda: discovered() if len(discovered()) == 2 else None)
+        initial_ui = call(first, "plugin", "--configuration", f"mode=dashboard,{base_config}", "--", f"file:{wasm}").strip()
+        current_id = next(a["identity"]["agent_id"] for a in rows if a["identity"]["session_name"] == first)
+        wait_for("initial dashboard selection prefers current session", lambda: any(
+            p["source_session"] == first and p["selected_id"] == current_id
+            for p in ping(first, "dashboard")))
+        call(first, "action", "close-pane", "--pane-id", initial_ui)
         screen_row = next(a for a in rows if a["identity"]["session_name"] == first)
         def current_screen_row():
             return next(a for a in discovered() if a["identity"] == screen_row["identity"])
@@ -356,6 +362,9 @@ fn main() {
                  if a["identity"] == agent["identity"])["status"] == "working")
         tab_ui = call(first, "plugin", "--configuration", f"mode=dashboard,{base_config}", "--", f"file:{wasm}").strip()
         wait_for("Tab dashboard loaded", lambda: any(p["permissions"] for p in ping(first, "dashboard")))
+        wait_for("initial dashboard selection focuses pinned current-session agent", lambda: any(
+            p["pinned_panel"] and p["selected_id"] == agent["identity"]["agent_id"]
+            for p in ping(first, "dashboard")))
         os.write(clients[0].fd, f"/{first}\r".encode())
         wait_for("Tab query scoped to temporary session", lambda: any(p["query"] == first for p in ping(first, "dashboard")))
         tab_client = next(p["client_id"] for p in ping(first, "dashboard") if p["query"] == first)

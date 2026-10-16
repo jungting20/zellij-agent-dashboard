@@ -442,6 +442,13 @@ impl ZellijPlugin for Dashboard {
                     let ids = get_plugin_ids();
                     self.plugin_id = Some(ids.plugin_id);
                     self.client_id = Some(ids.client_id);
+                    if let Ok(sessions) = get_session_list() {
+                        if let Some(session) =
+                            sessions.live_sessions.iter().find(|s| s.is_current_session)
+                        {
+                            self.view.source_session = session.name.clone();
+                        }
+                    }
                     if !self.collector {
                         rename_plugin_pane(ids.plugin_id, "Agent Dashboard");
                     }
@@ -466,7 +473,9 @@ impl ZellijPlugin for Dashboard {
             }
             Event::Visible(true) if !self.collector => self.refresh(),
             Event::ModeUpdate(info) => {
-                self.view.source_session = info.session_name.unwrap_or_default()
+                if let Some(session) = info.session_name {
+                    self.view.source_session = session;
+                }
             }
             Event::ListClients(clients) => {
                 self.window_clients(&clients);
