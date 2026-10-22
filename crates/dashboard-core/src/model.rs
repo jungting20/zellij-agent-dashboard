@@ -2,7 +2,7 @@ use crate::{StateSignal, StatusObservation, StatusSource};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 pub const EVENT_SCHEMA_VERSION: u32 = 1;
 pub const STALE_AFTER_MS: u64 = 60_000;
 pub const MAX_AGENT_HISTORY: usize = 256;
@@ -97,6 +97,9 @@ pub struct Agent {
     pub detail: String,
     pub status: Status,
     pub status_since_ms: u64,
+    /// Most recent accepted working -> idle transition in this execution.
+    #[serde(default)]
+    pub working_to_idle_at_ms: Option<u64>,
     pub last_report_ms: Option<u64>,
     pub liveness: Liveness,
     pub sequence: u64,
@@ -113,6 +116,8 @@ pub struct Agent {
     pub pane: PaneInfo,
     #[serde(default)]
     pub last_instruction_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "crate::InstructionQueue::is_empty")]
+    pub instruction_queue: crate::InstructionQueue,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -371,6 +376,9 @@ impl Store {
             }
             self.data.schema_version = SCHEMA_VERSION;
         }
+        if self.data.schema_version == 3 {
+            self.data.schema_version = SCHEMA_VERSION;
+        }
         self.check_version()
     }
 
@@ -465,10 +473,19 @@ impl Store {
                 agent.status
             }
         };
+        agent.instruction_queue.observe(
+            next == Status::Working,
+            event.kind == EventKind::TurnFinished,
+            event.kind == EventKind::TurnFailed,
+            event.observed_at_ms,
+        );
         if next != agent.status {
             let previous = agent.status;
             agent.status = next;
             agent.status_since_ms = event.observed_at_ms;
+            if previous == Status::Working && next == Status::Idle {
+                agent.working_to_idle_at_ms = Some(event.observed_at_ms);
+            }
             self.changes.activities = true;
             self.data.activities.push(Activity {
                 agent_id: agent.identity.agent_id.clone(),
@@ -536,10 +553,19 @@ impl Store {
             }
             if !confirm_idle || agent.idle_confirmations >= 3 {
                 agent.matched_rule.clone_from(&observation.rule_id);
+                agent.instruction_queue.observe(
+                    next == Status::Working,
+                    next == Status::Idle,
+                    next == Status::Failed,
+                    observation.observed_at_ms,
+                );
                 if next != agent.status {
                     let previous = agent.status;
                     agent.status = next;
                     agent.status_since_ms = observation.observed_at_ms;
+                    if previous == Status::Working && next == Status::Idle {
+                        agent.working_to_idle_at_ms = Some(observation.observed_at_ms);
+                    }
                     self.changes.activities = true;
                     self.data.activities.push(Activity {
                         agent_id: agent.identity.agent_id.clone(),
@@ -651,6 +677,7 @@ impl Store {
                     detail: String::new(),
                     status: Status::Found,
                     status_since_ms: now_ms,
+                    working_to_idle_at_ms: None,
                     last_report_ms: None,
                     liveness: Liveness::Live,
                     sequence: 0,
@@ -661,6 +688,7 @@ impl Store {
                     parent_id: None,
                     pane: PaneInfo::default(),
                     last_instruction_ms: None,
+                    instruction_queue: crate::InstructionQueue::default(),
                 });
         }
         // Retain a short history without letting ended processes accumulate forever.
@@ -980,6 +1008,69 @@ mod tests {
     }
 
     #[test]
+    fn working_to_idle_time_tracks_accepted_transitions_and_survives_reload() {
+        let mut store = Store::default();
+        store.reconcile(&[found("run")], 1000);
+        store
+            .apply_signal(&screen("run", 5000, Some(Status::Idle), true))
+            .unwrap();
+        assert_eq!(store.agents["run"].working_to_idle_at_ms, None);
+        store
+            .apply_signal(&screen("run", 6000, Some(Status::Working), false))
+            .unwrap();
+        store
+            .apply_signal(&screen("run", 7000, Some(Status::Idle), false))
+            .unwrap();
+        assert_eq!(store.agents["run"].working_to_idle_at_ms, None);
+        store
+            .apply_signal(&screen("run", 8000, Some(Status::Idle), true))
+            .unwrap();
+        assert_eq!(store.agents["run"].working_to_idle_at_ms, Some(8000));
+        for at in [8000, 7500, 9000] {
+            store
+                .apply_signal(&screen("run", at, Some(Status::Idle), true))
+                .unwrap();
+            assert_eq!(store.agents["run"].working_to_idle_at_ms, Some(8000));
+        }
+        // The timestamp is independent of the bounded activity history.
+        store.data.activities.clear();
+        let mut recovered: Store =
+            serde_json::from_str(&serde_json::to_string(&store).unwrap()).unwrap();
+        assert_eq!(recovered.agents["run"].working_to_idle_at_ms, Some(8000));
+        recovered
+            .apply_signal(&screen("run", 10000, Some(Status::Working), false))
+            .unwrap();
+        recovered
+            .apply_signal(&screen("run", 11000, Some(Status::Idle), true))
+            .unwrap();
+        assert_eq!(recovered.agents["run"].working_to_idle_at_ms, Some(11000));
+        recovered.reconcile(&[found("new-run")], 12000);
+        assert_eq!(recovered.agents["new-run"].working_to_idle_at_ms, None);
+
+        let mut old = serde_json::to_value(&store.agents["run"]).unwrap();
+        old.as_object_mut().unwrap().remove("working_to_idle_at_ms");
+        let old: Agent = serde_json::from_value(old).unwrap();
+        assert_eq!(old.working_to_idle_at_ms, None);
+
+        let mut hooked = Store::default();
+        hooked.reconcile(&[found("hook")], 1000);
+        hooked
+            .apply(&event("hook", 1, EventKind::TurnStarted))
+            .unwrap();
+        let idle = event("hook", 2, EventKind::SessionStarted);
+        hooked.apply(&idle).unwrap();
+        assert_eq!(hooked.agents["hook"].working_to_idle_at_ms, Some(1002));
+        assert_eq!(hooked.apply(&idle).unwrap(), ApplyResult::Ignored);
+        hooked
+            .apply(&event("hook", 3, EventKind::SessionStarted))
+            .unwrap();
+        hooked
+            .apply_signal(&screen("hook", 9000, Some(Status::Working), false))
+            .unwrap();
+        assert_eq!(hooked.agents["hook"].working_to_idle_at_ms, Some(1002));
+    }
+
+    #[test]
     fn hook_takes_over_screen_and_persists_without_timeout_fallback() {
         let mut store = Store::default();
         store.reconcile(&[found("run")], 1000);
@@ -1064,6 +1155,7 @@ mod tests {
             .apply_signal(&screen("run", 15_000, Some(Status::Idle), false))
             .unwrap();
         assert_eq!(store.data.agents["run"].status, Status::Idle);
+        assert_eq!(store.agents["run"].working_to_idle_at_ms, Some(15_000));
         store
             .apply_signal(&screen("run", 17_000, Some(Status::Working), false))
             .unwrap();
@@ -1071,6 +1163,7 @@ mod tests {
             .apply_signal(&screen("run", 19_000, Some(Status::Idle), true))
             .unwrap();
         assert_eq!(store.data.agents["run"].status, Status::Idle);
+        assert_eq!(store.agents["run"].working_to_idle_at_ms, Some(19_000));
     }
 
     #[test]
@@ -1201,7 +1294,7 @@ mod tests {
         pane.remove("observed_at_ms");
         let mut restored: Store = serde_json::from_value(value).unwrap();
         restored.migrate().unwrap();
-        assert_eq!(restored.data.schema_version, 3);
+        assert_eq!(restored.data.schema_version, SCHEMA_VERSION);
         assert_eq!(
             restored.data.agents["run"].pane.presence,
             PanePresence::Unknown

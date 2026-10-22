@@ -5,6 +5,62 @@ use dashboard_core::{
 };
 
 impl Dashboard {
+    pub(super) fn refresh_queue_menu(&mut self) {
+        let Some(menu) = self
+            .view
+            .menu
+            .as_mut()
+            .filter(|m| m.kind == MenuKind::Queue && !m.busy)
+        else {
+            return;
+        };
+        let Some(agent) = self.snapshot.as_ref().and_then(|s| {
+            s.agents
+                .iter()
+                .find(|a| Some(&a.identity) == menu.target.as_ref())
+        }) else {
+            return;
+        };
+        let chosen = menu.chosen();
+        menu.options.clear();
+        if let Some(delivery) = &agent.instruction_queue.delivery {
+            menu.options.push((
+                format!(
+                    "[{}] {}",
+                    delivery.message,
+                    delivery.instruction.text.lines().next().unwrap_or("")
+                ),
+                delivery.instruction.id.clone(),
+            ));
+        }
+        menu.options
+            .extend(
+                agent
+                    .instruction_queue
+                    .pending
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| {
+                        (
+                            format!(
+                                "대기 {} · {}",
+                                index + 1,
+                                item.text.lines().next().unwrap_or("")
+                            ),
+                            item.id.clone(),
+                        )
+                    }),
+            );
+        menu.selected = chosen
+            .and_then(|id| menu.options.iter().position(|(_, value)| *value == id))
+            .unwrap_or(0);
+        menu.error = if menu.options.is_empty() {
+            "예약된 입력이 없습니다".into()
+        } else {
+            String::new()
+        };
+    }
+
     pub(super) fn open_neovim(&mut self) {
         if !self.permissions || self.action_pending || self.active_request.is_some() {
             return;
@@ -47,7 +103,9 @@ impl Dashboard {
             return;
         }
         let title = match kind {
-            MenuKind::Input => "프롬프트",
+            MenuKind::Input => "프롬프트 · working 중 자동 예약",
+            MenuKind::Queue => "예약 입력 큐",
+            MenuKind::QueueResume => "예약 재개 확인",
             MenuKind::Alias => "태그",
             MenuKind::Recent => "새 에이전트",
             MenuKind::Worktree => "Worktree",
@@ -87,6 +145,7 @@ impl Dashboard {
             self.host("requests", None, "requests");
         }
         self.view.menu = Some(menu);
+        self.refresh_queue_menu();
     }
 
     pub(super) fn submit(&mut self, action: Action) {
@@ -240,6 +299,41 @@ impl Dashboard {
             menu.input.insert("\n", true);
             return;
         }
+        if menu.kind == MenuKind::Queue {
+            if key.bare_key == BareKey::Char('d') {
+                if let (Some(target), Some(queued_id)) = (menu.target.clone(), menu.chosen()) {
+                    self.submit(Action::CancelQueued { target, queued_id });
+                }
+                return;
+            }
+            if key.bare_key == BareKey::Char('r') {
+                let uncertain = self
+                    .snapshot
+                    .as_ref()
+                    .and_then(|s| {
+                        s.agents
+                            .iter()
+                            .find(|a| Some(&a.identity) == menu.target.as_ref())
+                    })
+                    .and_then(|a| a.instruction_queue.delivery.as_ref())
+                    .is_some_and(|d| d.state == dashboard_core::DeliveryState::Uncertain);
+                if !uncertain {
+                    menu.error = "확인이 필요한 전송이 없습니다".into();
+                    return;
+                }
+                menu.kind = MenuKind::QueueResume;
+                menu.title = "전송 여부를 직접 확인한 뒤 재개하세요".into();
+                menu.options = vec![
+                    ("돌아가기".into(), "no".into()),
+                    (
+                        "확인 완료 · 불명확한 항목 재전송 없이 다음부터 재개".into(),
+                        "yes".into(),
+                    ),
+                ];
+                menu.selected = 0;
+                return;
+            }
+        }
         let shortcut = if menu.kind == MenuKind::Worktree {
             match key.bare_key {
                 BareKey::Char('a') => Some("add"),
@@ -257,6 +351,47 @@ impl Dashboard {
             let target = menu.target.clone();
             let chosen = shortcut.map(String::from).or_else(|| menu.chosen());
             match kind {
+                MenuKind::Queue => {
+                    let Some(id) = chosen else { return };
+                    let text = self
+                        .snapshot
+                        .as_ref()
+                        .and_then(|s| {
+                            s.agents.iter().find(|a| {
+                                Some(&a.identity.agent_id) == target.as_ref().map(|t| &t.agent_id)
+                            })
+                        })
+                        .and_then(|a| {
+                            a.instruction_queue
+                                .pending
+                                .iter()
+                                .find(|i| i.id == id)
+                                .or_else(|| {
+                                    a.instruction_queue
+                                        .delivery
+                                        .as_ref()
+                                        .map(|d| &d.instruction)
+                                        .filter(|i| i.id == id)
+                                })
+                        })
+                        .map(|i| i.text.clone())
+                        .unwrap_or_else(|| {
+                            "예약 항목이 변경되었습니다. Q로 다시 확인하세요".into()
+                        });
+                    menu.kind = MenuKind::Result;
+                    menu.title = "예약 입력 내용".into();
+                    menu.result = text;
+                    menu.options.clear();
+                }
+                MenuKind::QueueResume => {
+                    if chosen.as_deref() == Some("yes") {
+                        if let Some(target) = target {
+                            self.submit(Action::ResumeQueue { target });
+                        }
+                    } else {
+                        self.view.menu = None;
+                    }
+                }
                 MenuKind::Input => {
                     let text = menu.input.text.clone();
                     if !text.trim().is_empty() {

@@ -36,7 +36,7 @@ impl<'a> ZellijCli<'a> {
             Duration::from_millis(1200),
             1024 * 1024,
         )?;
-        let panes: Vec<CliPane> = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        let panes: Vec<CliPane> = parse_panes(session, &bytes)?;
         if panes.iter().any(|pane| {
             pane.is_plugin
                 && pane.is_floating
@@ -151,6 +151,20 @@ struct CliPane {
     pane_cwd: Option<String>,
 }
 
+fn parse_panes(session: &SessionId, bytes: &[u8]) -> Result<Vec<CliPane>, String> {
+    serde_json::from_slice(bytes).map_err(|error| {
+        let response: String = String::from_utf8_lossy(bytes)
+            .chars()
+            .take(240)
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        format!(
+            "Zellij list-panes --json 세션 {:?}: {error}; 응답: {response:?}",
+            session.0
+        )
+    })
+}
+
 impl TerminalHost for ZellijCli<'_> {
     fn list_panes(
         &self,
@@ -169,7 +183,7 @@ impl TerminalHost for ZellijCli<'_> {
             timeout,
             if all_tabs { 1024 * 1024 } else { 128 * 1024 },
         )?;
-        let panes: Vec<CliPane> = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        let panes: Vec<CliPane> = parse_panes(session, &bytes)?;
         Ok(panes
             .into_iter()
             .filter(|p| !p.is_plugin)
@@ -435,6 +449,19 @@ mod tests {
             calls.last().unwrap().timeout,
             Some(Duration::from_millis(500))
         );
+    }
+
+    #[test]
+    fn invalid_inventory_reports_session_and_bounded_response() {
+        for bytes in [b"No session found\n".as_slice(), b"", &[27; 400]] {
+            let error = match parse_panes(&SessionId("dev".into()), bytes) {
+                Err(error) => error,
+                Ok(_) => panic!("invalid inventory accepted"),
+            };
+            assert!(error.contains("dev") && error.contains("list-panes --json"));
+            assert!(!error.contains('\n') && !error.contains('\x1b'));
+            assert!(error.len() < 500);
+        }
     }
 
     #[test]

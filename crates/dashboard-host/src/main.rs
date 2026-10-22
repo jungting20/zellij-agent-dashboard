@@ -3,6 +3,7 @@ mod collector;
 mod command;
 mod hooks;
 mod host;
+mod instruction_queue;
 mod legacy_json;
 mod panes;
 mod process;

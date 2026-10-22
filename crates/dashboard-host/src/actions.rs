@@ -93,7 +93,7 @@ pub fn link_launches(store: &mut dashboard_core::Store, inventory: &process::Inv
     }
 }
 
-fn checked(target: &Identity, deps: &HostDependencies) -> Result<Agent, String> {
+pub(crate) fn checked(target: &Identity, deps: &HostDependencies) -> Result<Agent, String> {
     let pane = panes::require_present(target, deps)?;
     let inventory_at = now_ms();
     let inventory = process::inventory(deps.runner)?;
@@ -195,6 +195,43 @@ fn choose_launch_tab(
     }
 }
 
+fn find_launch_tab<'a>(
+    sessions: impl Iterator<Item = &'a str>,
+    preferred_session: &'a str,
+    path: &Path,
+    terminal: &dyn crate::terminal::TerminalHost,
+) -> Result<(String, u32), String> {
+    let mut matches = std::collections::BTreeSet::new();
+    // A match in the requesting session takes precedence, so unrelated
+    // sessions must not prevent a launch there.
+    for name in
+        std::iter::once(preferred_session).chain(sessions.filter(|name| *name != preferred_session))
+    {
+        let panes = terminal
+            .list_panes(&SessionId(name.into()), true, Duration::from_millis(1200))
+            .map_err(|error| format!("Zellij 세션 {name:?}의 실행 대상 조회 실패: {error}"))?;
+        for pane in panes {
+            if pane
+                .cwd
+                .as_deref()
+                .and_then(|p| fs::canonicalize(p).ok())
+                .as_deref()
+                == Some(path)
+            {
+                if let Some(tab) = pane.tab_id {
+                    matches.insert((name.into(), tab));
+                }
+            }
+        }
+        if name == preferred_session && !matches.is_empty() {
+            break;
+        }
+    }
+    // Do not ignore failed cross-session queries: they may hide another
+    // matching tab and turn an ambiguous destination into an arbitrary one.
+    choose_launch_tab(matches, preferred_session)
+}
+
 struct LaunchTarget<'a> {
     tab_id: Option<u32>,
     session: &'a str,
@@ -290,15 +327,8 @@ fn launch(
     Ok((format!("{tool} 실행 완료"), Some(pane), directory))
 }
 
-fn send(target: &Identity, text: &str, deps: &HostDependencies) -> Result<(), String> {
-    if text.trim().is_empty()
-        || text.len() > 64 * 1024
-        || text
-            .chars()
-            .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
-    {
-        return Err("입력은 64 KiB 이하의 텍스트여야 합니다".into());
-    }
+pub(crate) fn send(target: &Identity, text: &str, deps: &HostDependencies) -> Result<(), String> {
+    dashboard_core::validate_instruction(text)?;
     checked(target, deps)?;
     // Paste preserves multiline instructions. Delivery failures are uncertain.
     let paste = format!("\x1b[200~{text}\x1b[201~");
@@ -325,8 +355,41 @@ fn execute(
 ) -> Result<(String, Option<u32>, String), String> {
     match &request.action {
         Action::Input { target, text } => {
+            dashboard_core::validate_instruction(text)?;
+            checked(target, deps)?;
+            let mut locked = deps.repository.begin_runtime()?;
+            if let Some(position) =
+                locked
+                    .store
+                    .queue_input(target, &request.request_id, text, now_ms())?
+            {
+                locked.commit()?;
+                return Ok((
+                    format!("예약 추가 완료 · 대기 {position}번째 · Q에서 확인/취소"),
+                    None,
+                    String::new(),
+                ));
+            }
+            drop(locked);
             send(target, text, deps)?;
             Ok(("입력 전송 완료".into(), None, String::new()))
+        }
+        Action::CancelQueued { target, queued_id } => {
+            let mut locked = deps.repository.begin_runtime()?;
+            locked.store.cancel_queued_input(target, queued_id)?;
+            locked.commit()?;
+            Ok(("예약 취소 완료".into(), None, String::new()))
+        }
+        Action::ResumeQueue { target } => {
+            checked(target, deps)?;
+            let mut locked = deps.repository.begin_runtime()?;
+            locked.store.resume_instruction_queue(target)?;
+            locked.commit()?;
+            Ok((
+                "확인된 항목을 제외하고 다음 예약부터 재개합니다".into(),
+                None,
+                String::new(),
+            ))
         }
         Action::Alias { target, alias } => {
             checked(target, deps)?;
@@ -359,28 +422,12 @@ fn execute(
             if inventory.epochs.get(session) != Some(epoch) {
                 return Err("Zellij session changed or exited".into());
             }
-            let mut matches = std::collections::BTreeSet::new();
-            for name in inventory.epochs.keys() {
-                let panes = deps.terminal.list_panes(
-                    &SessionId(name.clone()),
-                    true,
-                    Duration::from_millis(1200),
-                )?;
-                for pane in panes {
-                    if pane
-                        .cwd
-                        .as_deref()
-                        .and_then(|p| fs::canonicalize(p).ok())
-                        .as_ref()
-                        == Some(&path)
-                    {
-                        if let Some(tab) = pane.tab_id {
-                            matches.insert((name.clone(), tab));
-                        }
-                    }
-                }
-            }
-            let (destination, tab) = choose_launch_tab(matches, session)?;
+            let (destination, tab) = find_launch_tab(
+                inventory.epochs.keys().map(String::as_str),
+                session,
+                &path,
+                deps.terminal,
+            )?;
             let destination_epoch = &inventory.epochs[&destination];
             launch(
                 request,
@@ -624,7 +671,13 @@ pub fn action(
             Some(path),
         )?,
         Err(error) => {
-            let state = if matches!(request.action, Action::Alias { .. }) {
+            let launch_not_started = matches!(request.action, Action::Launch { .. })
+                && !locked.store.launches.contains_key(&request.request_id);
+            let state = if matches!(
+                request.action,
+                Action::Alias { .. } | Action::CancelQueued { .. } | Action::ResumeQueue { .. }
+            ) || launch_not_started
+            {
                 RequestState::Failed
             } else {
                 RequestState::Uncertain
@@ -681,6 +734,7 @@ mod tests {
     struct FakeHost {
         changed: Cell<bool>,
         missing_pane: Cell<bool>,
+        routing: Cell<bool>,
         change_after_paste: Cell<bool>,
         calls: RefCell<Vec<String>>,
     }
@@ -729,10 +783,23 @@ mod tests {
     impl TerminalHost for FakeHost {
         fn list_panes(
             &self,
-            _: &SessionId,
+            session: &SessionId,
             _: bool,
             _: Duration,
         ) -> Result<Vec<TerminalPane>, String> {
+            if self.routing.get() {
+                self.calls.borrow_mut().push(session.0.clone());
+                if session.0 != "dev" {
+                    return Err("invalid JSON response".into());
+                }
+                return Ok(vec![TerminalPane {
+                    id: pane_id(7),
+                    tab_id: Some(3),
+                    tab_name: String::new(),
+                    title: String::new(),
+                    cwd: Some("/tmp".into()),
+                }]);
+            }
             Ok(if self.missing_pane.get() {
                 vec![]
             } else {
@@ -772,6 +839,55 @@ mod tests {
         fn notify_changed(&self, _: &SessionId, _: &str) -> Result<(), String> {
             panic!("unexpected notify")
         }
+    }
+
+    #[test]
+    fn launch_preflight_failure_is_failed_and_duplicate_is_not_reexecuted() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeHost::default();
+        let target = fake.seed(dir.path());
+        let repository = crate::repository::at(dir.path());
+        let deps = HostDependencies {
+            repository: repository.as_ref(),
+            runner: &fake,
+            terminal: &fake,
+        };
+        let request = ActionRequest {
+            request_id: "launch-preflight".into(),
+            action: Action::Launch {
+                session: "dev".into(),
+                epoch: target.session_epoch,
+                cwd: "/tmp".into(),
+                tool: "codex".into(),
+            },
+        };
+        let result = action(dir.path(), request.clone(), &deps).unwrap();
+        assert_eq!(result.state, RequestState::Failed);
+        assert!(result.message.contains("찾을 수 없습니다"));
+        let duplicate = action(dir.path(), request, &deps).unwrap();
+        assert_eq!(duplicate.state, result.state);
+        assert_eq!(duplicate.message, result.message);
+        assert!(fake.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn launch_in_preferred_session_does_not_query_broken_unrelated_session() {
+        let host = FakeHost::default();
+        host.routing.set(true);
+        let path = fs::canonicalize("/tmp").unwrap();
+        assert_eq!(
+            find_launch_tab(["broken", "dev"].into_iter(), "dev", &path, &host).unwrap(),
+            ("dev".into(), 3)
+        );
+        assert_eq!(*host.calls.borrow(), ["dev"]);
+
+        host.calls.borrow_mut().clear();
+        let missing = tempfile::tempdir().unwrap();
+        let path = fs::canonicalize(missing.path()).unwrap();
+        let error =
+            find_launch_tab(["broken", "dev"].into_iter(), "dev", &path, &host).unwrap_err();
+        assert!(error.contains("broken") && error.contains("invalid JSON response"));
+        assert_eq!(*host.calls.borrow(), ["dev", "broken"]);
     }
 
     #[test]

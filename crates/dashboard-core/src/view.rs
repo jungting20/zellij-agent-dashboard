@@ -333,7 +333,7 @@ impl View {
         let footer = vec![
             Line::color(rule, color, false),
             Line::plain(if width >= 75 {
-                "Tab working h/l 영역 p 지시 n 새 실행 e Neovim i 입력 I 에디터 g worktree m 병합 a 태그 Space pin d 종료 Enter 이동 R 갱신 q 닫기"
+                "Tab working h/l 영역 p 지시 n 새 실행 e Neovim i 입력/예약 Q 예약큐 I 에디터 g worktree m 병합 a 태그 Space pin d 종료 Enter 이동 R 갱신 q 닫기"
             } else {
                 "Tab working h/l 영역 e Neovim Space pin Enter focus / 검색 q quit"
             }),
@@ -537,6 +537,18 @@ impl View {
         );
         if project == "unknown" {
             project = "-".into();
+        }
+        if !agent.instruction_queue.is_empty() {
+            let queue = &agent.instruction_queue;
+            let paused = queue
+                .delivery
+                .as_ref()
+                .is_some_and(|d| d.state == crate::DeliveryState::Uncertain);
+            project.push_str(&format!(
+                " [예약 {}{}]",
+                queue.pending.len(),
+                if paused { " · 확인 필요" } else { "" }
+            ));
         }
         let project_width = width.saturating_sub(39).max(8);
         let (status, color) = status_label(agent);
@@ -851,6 +863,68 @@ mod tests {
             agent.pane.observed_at_ms = 1000;
         }
         store.snapshot(1000)
+    }
+
+    #[test]
+    fn idle_navigation_cycles_recent_transitions_with_stable_ties_and_unknowns_last() {
+        let mut snapshot = populated();
+        snapshot.agents.truncate(6);
+        let ids: Vec<_> = snapshot
+            .agents
+            .iter()
+            .map(|a| a.identity.agent_id.clone())
+            .collect();
+        for agent in &mut snapshot.agents {
+            agent.status = Status::Idle;
+        }
+        // Deliberately oppose pane/display order.
+        snapshot.agents[0].working_to_idle_at_ms = Some(2000);
+        snapshot.agents[1].working_to_idle_at_ms = Some(4000);
+        snapshot.agents[2].working_to_idle_at_ms = Some(3000);
+        snapshot.agents[3].working_to_idle_at_ms = Some(3000);
+        snapshot.agents[4].working_to_idle_at_ms = Some(9000);
+        snapshot.agents[4].pinned = true;
+        let view = View::default();
+        let filter = crate::NextFilter::IdleAndUnpinned;
+        let next = |snapshot: &Snapshot, current: Option<&str>| {
+            view.next_agent(snapshot, filter, current)
+                .unwrap()
+                .identity
+                .agent_id
+                .clone()
+        };
+        let mut cursor = None;
+        for index in [1, 2, 3, 0, 5, 1] {
+            let id = next(&snapshot, cursor.as_deref());
+            assert_eq!(id, ids[index]);
+            cursor = Some(id);
+        }
+        assert_eq!(next(&snapshot, Some("gone")), ids[1]);
+        // A working current pane is not an idle cursor; start at newest.
+        snapshot.agents[0].status = Status::Working;
+        assert_eq!(next(&snapshot, Some(&ids[0])), ids[1]);
+        // A newly completed turn leads the next search from a working pane.
+        snapshot.agents[3].working_to_idle_at_ms = Some(5000);
+        assert_eq!(next(&snapshot, Some(&ids[0])), ids[3]);
+        snapshot.agents[3].pane.presence = crate::PanePresence::Missing;
+        snapshot.agents[1].liveness = Liveness::Unverified;
+        assert_eq!(next(&snapshot, None), ids[2]);
+        assert_eq!(
+            view.next_agent(&snapshot, crate::NextFilter::IdleAndPinned, None)
+                .unwrap()
+                .identity
+                .agent_id,
+            ids[4]
+        );
+        // Non-idle filters retain the existing display ordering.
+        snapshot.agents[0].status = Status::Idle;
+        assert_eq!(
+            view.next_agent(&snapshot, crate::NextFilter::UnpinnedOnly, None)
+                .unwrap()
+                .identity
+                .agent_id,
+            ids[0]
+        );
     }
 
     #[test]

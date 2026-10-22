@@ -29,7 +29,9 @@ pub fn scan(deps: &HostDependencies) -> Result<Snapshot, String> {
         locked.commit()?;
     }
     result?;
-    Ok(locked.store.snapshot(now_ms()))
+    drop(locked);
+    crate::instruction_queue::dispatch(deps)?;
+    deps.repository.snapshot(now_ms())
 }
 
 fn owns_claim(locked: &crate::repository::UnitOfWork, token: &str) -> bool {

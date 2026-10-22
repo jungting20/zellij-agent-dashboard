@@ -79,15 +79,23 @@ pub struct NextRequest {
 }
 
 impl View {
-    /// Walk display order once, wrapping after the last row. The current row
-    /// remains the anchor even when it no longer matches the requested filter.
+    /// Idle navigation walks matching candidates by most recent working -> idle
+    /// transition. Other filters keep display order, including the current anchor.
     pub fn next_agent<'a>(
         &self,
         snapshot: &'a Snapshot,
         filter: NextFilter,
         current_id: Option<&str>,
     ) -> Option<&'a Agent> {
-        let rows = self.rows(snapshot);
+        let mut rows = self.rows(snapshot);
+        if matches!(
+            filter,
+            NextFilter::IdleAndPinned | NextFilter::IdleAndUnpinned
+        ) {
+            rows.retain(|a| filter.matches(a, super::view::hierarchy_root(snapshot, a).pinned));
+            // Stable sorting preserves display order for ties and unknown history.
+            rows.sort_by_key(|a| std::cmp::Reverse(a.working_to_idle_at_ms));
+        }
         let start = rows
             .iter()
             .position(|a| Some(a.identity.agent_id.as_str()) == current_id)

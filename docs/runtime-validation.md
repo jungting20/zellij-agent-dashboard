@@ -8,6 +8,8 @@
 
 `bash scripts/install.sh`로 설치하고 dist와 설치 host/WASM의 SHA-256 일치를 확인했다. 현재 작업 세션 `loop`의 collector만 reload해 기존 plugin ID 유지, permissions=true, error=null, 상태 revision·poll 증가를 확인했다. 열린 대시보드는 없어 다음 열기부터 적용된다. 임시 연결 클라이언트는 종료했다. 적용 결과는 `.local/apply-initial-focus-loop.json`이다.
 
+이어 사용자의 전체 세션 적용 요청에 따라 실행 중인 `study`, `loop`, `운영`, `zellij-with-code-agent` 네 세션의 collector를 모두 reload했다. 각 세션에서 기존 plugin ID 0 유지, 중복 없음, permissions=true, error=null, revision·poll 증가를 확인했다. 열린 대시보드는 없었으며 다음 열기부터 최신 동작을 사용한다. 종료 상태인 `hermes`는 복원하지 않았다. 임시 연결 클라이언트는 종료하고 기존 연결은 유지했다. 결과는 `.local/apply-initial-focus-all.json`이다.
+
 ## 2026-10-14 Alt w의 idle 제외 필터
 
 전역 이동에 `non-idle` 필터를 추가했다. 표시 가능하고 생존이 확인된 실행 중 `idle`만 제외하며 `working`, `waiting`, `compact`, `done`, `failed`, `found`를 포함한다. `working-only`와 대시보드 `Tab`은 기존 working 전용 동작을 유지한다. 저장 구조와 버전은 바뀌지 않는다.
@@ -250,3 +252,41 @@ Zellij 0.45.0의 설치된 `new-pane --help`에서 `--tab-id` 지원을 확인�
 전체 임시 세션 smoke는 `.local/smoke-b5fbd8f39b/result.json`에 기록했다. 요청 세션과 다른 세션의 비활성 탭에 선택 경로가 열려 있는 경우 해당 탭에 생성되는지, 대상 없는 경로 오류, 요청 재사용, 생성 프로세스 발견과 화면·입력·종료, collector detach/reload와 대시보드 재열기를 확인했다. 생성 직전 경로 재조회 보강 후 최종 빌드는 별도 임시 세션에서 다른 세션·비활성 탭, 심볼릭 링크 경로, 호출자 세션·pane 환경 상속, 중복 요청, 여러 일치 탭과 대상 없음 오류를 검증했다. 결과는 `.local/route-0019e3c051/result.json`에 기록했고 생성한 임시 세션은 종료했다.
 
 사용자의 전체 세션 reload 요청에 따라 실행 중인 `운영`, `study`, `wiki`, `zellij-with-code-agent`, `loop`, `hermes` 6개 세션의 `agent-dashboard` collector를 `start-or-reload-plugin`으로 reload했다. 당시 열린 대시보드는 없었다. 연결된 클라이언트가 없는 세션에는 임시 클라이언트를 attach한 뒤 reload하고 분리했다. 각 세션에서 permissions, 상태 revision, 오류 없음, reload 후 poll 증가를 확인했다. 종료된 smoke 세션은 복원하지 않았다. 적용 기록은 `.local/reload-all-dashboard-result.json`에 남겼다.
+
+## 2026-10-22 새 에이전트 생성 전 pane 조회 오류
+
+저장된 요청 `14:1:1792630439277954000:1`은 `rea`에서 Claude 실행을 요청했으며 `expected value at line 1 column 1`로 끝났다. 해당 메시지의 호스트 경로는 생성 전 `list-panes --json` 파싱이다. 당시 원본 응답은 보관되지 않아 어느 세션의 어떤 출력이 원인이었는지는 확정하지 못했다. 조사 시 실행 중인 7개 세션은 모두 정상 JSON을 반환했다.
+
+현재 세션에서 경로가 일치하는 탭을 먼저 조회하고, 후보가 있으면 무관한 세션을 조회하지 않는다. 현재 세션에 후보가 없을 때만 다른 세션을 조회하며, 그 과정의 조회 실패는 숨은 후보로 인한 잘못된 탭 선택을 막기 위해 계속 오류로 처리한다. JSON 파싱 실패에는 세션명과 제어 문자를 제거하고 240자로 제한한 응답을 포함한다. Launch의 실행 기록을 저장하기 전 발생한 오류는 `Failed`로 표시하고, 실행 기록 저장 이후 오류는 `Uncertain`을 유지한다. 같은 요청의 자동 재실행은 하지 않는다. 상태 스키마는 변경하지 않았다.
+
+`bash scripts/check.sh`에서 코어 37개·호스트 58개 테스트, 포맷·네이티브/WASI Clippy·스크립트 구문 검사를 통과했다. 기존 수동 성능 테스트 1개는 ignored다. `bash scripts/build.sh`로 host와 WASM release를 빌드했다. 실제 Zellij 0.45.0 임시 세션에서 무관한 세션의 잘못된 JSON 응답을 CLI 래퍼로 주입해 현재 세션 생성 성공·중복 생성 방지·현재 세션에 후보가 없을 때 세션/응답을 포함한 Failed 결과·실패 요청 중복 억제를 확인했다. 결과는 `.local/launch-json-e4ea0135/result.json`이다. 별도의 임시 세션에서 다른 세션의 비활성 탭, 심볼릭 링크, 호출자 pane 환경, 중복 요청, 다중 후보와 후보 없음도 검증했다. 결과는 `.local/route-0bb04d9f06/result.json`이며 모든 임시 세션은 종료했다. 전체 smoke는 이번에 실행하지 않았다.
+
+`bash scripts/install.sh`로 설치하고 dist와 설치 host/WASM의 SHA-256 일치를 확인했다. 오류 요청의 대상인 `rea` 세션 collector만 reload했다. 기존 plugin ID 유지·pane 추가 없음·permissions=true·error=null·revision과 poll 증가를 확인했다. 당시 열린 dashboard는 없어 다음 열기부터 최신 설치본을 사용한다. 검증용 임시 클라이언트는 종료했다. 적용 기록은 `.local/apply-launch-json-rea.json`이다. 과거 실패 요청은 보존했으며 자동 재전송하지 않았다.
+
+## 2026-10-22 idle 이동을 최근 working → idle 순서로 변경
+
+`Alt i`(`idle-and-pinned`)와 `Alt p`(`idle-and-unpinned`)는 일치하는 후보를 마지막 `working → idle` 전환 시각 내림차순으로 순환한다. 현재 실행이 후보이면 다음 후보로, 후보가 아니면 최신 후보로 이동하며 끝에서는 처음으로 돌아간다. 전환 기록이 없는 초기 idle·기존 버전 실행은 뒤에 두고 동률은 기존 표시 순서를 유지한다. 다른 필터와 화면 목록 정렬은 유지한다.
+
+코어가 실제 수락한 전환 시각을 선택적 `Agent.working_to_idle_at_ms`에 저장한다. 반복 idle·중복·역순·훅 전환 뒤 무시한 화면 결과는 시각을 갱신하지 않는다. 화면 연속 확인은 확정 관측 시각을 사용한다. 새 실행은 초기화하고 활동 50건 제한과 별도로 저장해 reload 후에도 보존한다. 하위 호환 필드이므로 DB 구조 2·Store/스냅샷 3·이벤트 1을 유지하며 기존 필드 없음의 기본값은 `None`이다. 버전·기본값·롤백 시 시각 보존 한계는 `docs/architecture.md`에 기록했다.
+
+`bash scripts/check.sh`에서 코어 39개·호스트 58개 테스트, 포맷·네이티브/WASI Clippy·스크립트 구문 검사를 통과했다. 기존 수동 성능 테스트 1개는 ignored다. 최신순 순환·동률·기록 없음·현재 후보 부재·고정 구분·새 전환·미확인/부재 pane 제외와 기존 비idle 정렬, 화면/훅 전환 시각·중복/역순·저장 복원·새 세대 초기화·이전 Agent JSON 기본값을 확인했다.
+
+Zellij 0.45.0 임시 세션에서 실제 Codex 화면 형식의 fixture 3개를 실행해 pane 순서와 다른 완료 순서, 초기 idle 후순위, `Alt i` 최신순/끝 순환, collector reload 후 시각과 순서 보존, 새 working → idle 후 최신 후보 변경, `Alt p`의 최신순 이동을 확인했다. 결과는 `.local/idle-recency-e3e0170e/result.json`의 19개 확인 항목이다. 임시 세션은 종료했다. 최초 두 검증 시도는 임시 설정 KDL 문법 오류로 세션 생성에 실패했으며 최종 검증에서는 수정했다. 전체 smoke는 이번에 재실행하지 않았다.
+
+검증 후 `bash scripts/build.sh`와 `bash scripts/install.sh`로 최종 host/WASM을 빌드·설치하고 dist와 설치 파일의 SHA-256 일치를 확인했다. 현재 작업 세션 `loop`와 앞서 확인한 `rea`의 collector를 reload했다. 두 세션 모두 기존 plugin ID 0과 중복 없음, permissions=true·error=null, reload에 따른 poll 초기화와 이후 poll/revision 증가를 확인했다. 당시 열린 dashboard는 없었다. 설치 host의 스냅샷에서 새 필드 제공도 확인했다. 임시 연결 클라이언트는 종료했고 기존 클라이언트는 유지했다. 결과는 `.local/apply-idle-recency-loop.json`과 `.local/apply-idle-recency-rea.json`이다. `rea`의 최초 적용 검사는 진행 중인 pane 변경으로 전체 pane 집합 동일성 조건을 만족하지 못했고, 이후 collector ID 보존을 검증하도록 보완했다. 최종 적용에서는 호출자의 Zellij 환경을 제거해 대상 세션을 명시하고, 실제 처리 클라이언트의 poll 183→3 초기화와 3→4 증가를 확인했다.
+
+사용자의 전체 세션 적용 요청에 따라 실행 중인 `study`, `loop`, `asbplayer`, `운영`, `hermes`, `rea`, `zellij-with-code-agent` 7개 세션의 collector에 최신 설치본을 reload했다. dist와 설치 host/WASM 해시 일치를 확인했고, 각 세션에서 기존 plugin ID 0 유지·중복 없음·permissions=true·error=null·reload 후 poll/revision 증가를 확인했다. 열린 dashboard는 없었으며 다음 열기부터 설치된 최신본을 사용한다. 클라이언트가 없는 세션에는 검증용 클라이언트를 잠시 연결한 뒤 종료했고 기존 연결은 유지했다. 최초 `loop` 검사는 reload 전 현재 클라이언트 응답 대기에서 시간 초과되어 먼저 reload한 뒤 다시 검사해 poll 2→4와 revision 증가를 확인했다. 최종 실행 세션 목록과 적용 목록도 대조했다. 통합 결과는 `.local/apply-idle-recency-all.json`, `loop` 재검증은 `.local/apply-idle-recency-loop-retry.json`이다.
+
+## 2026-10-22 working 중 입력 자동 예약과 에이전트별 FIFO
+
+사용자 선택에 따라 `i` 입력은 working/compact 중 자동 예약하고, idle에서 큐가 비어 있으면 기존처럼 즉시 전송한다. 이미 예약이나 전송 항목이 있으면 뒤에 추가해 FIFO를 보존한다. `Q`에서 진행 상태·대기 목록·전체 내용(Enter)을 확인하고 `d`로 대기 항목을 취소한다. 불명확한 전송은 `r`의 별도 확인을 거쳐 그 항목 재전송 없이 다음 예약부터 재개한다. 최대 32개·총 64 KiB이며 큐는 실행 identity에 묶는다.
+
+정책은 코어 `instruction_queue`에, 한 수집당 최대 한 항목의 유한한 외부 전송은 호스트 `instruction_queue::dispatch`에 구현했다. claim을 저장한 뒤 잠금 밖에서 pane/프로세스 세대를 재검증해 전송하고, 시작과 완료를 모두 관측해야 다음 항목을 보낸다. 전송 중 시작/완료가 먼저 도착해도 전송 결과 저장 전에는 다음 항목을 claim하지 않는다. 화면 idle을 TurnFinished 사건으로 바꾸지 않으며 훅 전환 뒤 화면 결과는 기존 정책대로 무시한다. 조회 실패/overlay·중복 idle로 큐를 비우지 않는다. 실패·claim 만료·시작 미확인은 자동 재전송 없이 확인 대기로 남는다. 시작이 관측된 긴 작업에는 시간 제한을 두지 않는다.
+
+Store/스냅샷을 4로 올렸고 DB 구조 2·훅 사건 1은 유지했다. 1/2/3에서 자동 이관하고 큐 필드 없음은 빈 큐다. 상태·기본값·구버전 작성자 보호·롤백 방법은 아키텍처에 기록했다. 신규 큐·취소·재개에 기존 요청 ID 중복 억제를 적용한다. 별도 데몬·상주 서버·시간 기반 스케줄러는 추가하지 않았다.
+
+`bash scripts/check.sh`에서 코어 45개·호스트 61개 테스트, 포맷·native/WASI Clippy·스크립트 구문 검사를 통과했다. 기존 수동 성능 테스트 1개는 ignored다. FIFO·한 번에 하나·중복 등록·개수/바이트 한도·취소·시작/완료 확인·전송 중 완료·훅 출처·overlay/오래된 화면·재로딩·전송 claim 만료·불명확 재개·실패·새 실행 초기화·스키마 3 기본값 이관을 확인했다. 호스트 동시 dispatcher 두 개의 단일 전송, 여러 줄 보존, paste 후 세대 교체 시 Enter 차단과 재전송 금지도 확인했다.
+
+실제 Zellij 0.45.0 임시 세션에서 Codex 화면 fixture와 실제 `i/Q/d/r` 입력으로 3개 예약·선택 취소·FIFO 순차 전송·반복 working 관측 중 다음 항목 유지·여러 줄/한국어·요청 재사용·collector reload·idle 즉시 입력을 확인했다. CLI 래퍼로 write 실패를 주입해 확인 대기·idle 재관측에도 재전송 없음·확인 메뉴 후 실패 항목 제외와 다음 항목 전송을 확인했다. pane 종료 뒤 새 실행에 이전 예약이 전달되지 않는 것도 확인했다. 최종 결과는 `.local/instruction-queue-fe8dc709/result.json`이며 임시 세션과 해당 종료 기록은 정리했다. 최초 시도는 임시 플러그인 권한 승인 대기에서, 다음 시도는 성공 시 입력 메뉴가 닫히는 기존 계약과 다른 검증 조건으로 중단됐다. 검증 도구를 보완한 뒤 최종 빌드에서 통과했다. 전체 `scripts/smoke.py`는 이번에 재실행하지 않았고 실제 AI 제공자별 전체 대화 검증으로 확대하지 않는다.
+
+검증 후 `bash scripts/build.sh`와 `bash scripts/install.sh`로 최종 host/WASM을 빌드·설치했다. 업그레이드 전 SQLite 온라인 백업과 기존 설치 파일은 `.local/instruction-queue-upgrade-backup-20261022-104049`에 보존했다. 실행 중인 `study`, `loop`, `asbplayer`, `운영`, `hermes`, `zellij-with-code-agent` 6개 세션의 collector를 reload해 기존 plugin ID 유지·중복 없음·permissions=true·error=null·Connected 응답·reload 후 poll/revision 증가를 확인했다. 당시 열린 dashboard는 없었다. 종료 상태인 `rea`는 복원하지 않았으며 다음 실행에서 설치본을 사용한다. 임시 클라이언트는 종료했고 기존 연결은 유지했다. 설치 파일 해시 일치, 실제 스냅샷 스키마 4와 마지막 세션별 CLI 재조회로 접근 가능한 6개 세션 대비 적용 범위도 확인했다. 프로세스 목록에 남은 `rea`는 CLI에서 종료 상태로 확인되어 적용 대상으로 복원하지 않았다. 결과는 `.local/apply-instruction-queue-all.json`이다.

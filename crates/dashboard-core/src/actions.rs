@@ -14,6 +14,13 @@ pub enum Action {
         target: Identity,
         text: String,
     },
+    CancelQueued {
+        target: Identity,
+        queued_id: String,
+    },
+    ResumeQueue {
+        target: Identity,
+    },
     Close {
         target: Identity,
     },
@@ -63,6 +70,8 @@ impl Action {
             | Self::ShellChildren { parent, .. }
             | Self::Merge { parent, .. } => Some(parent),
             Self::Input { target, .. }
+            | Self::CancelQueued { target, .. }
+            | Self::ResumeQueue { target }
             | Self::Close { target }
             | Self::Alias { target, .. }
             | Self::Lazygit { target, .. }

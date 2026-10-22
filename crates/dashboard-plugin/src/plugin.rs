@@ -307,6 +307,7 @@ fi"#,
         }
         match key.bare_key {
             BareKey::Char('i') => self.open_menu(MenuKind::Input),
+            BareKey::Char('Q') => self.open_menu(MenuKind::Queue),
             BareKey::Char('e') => self.open_neovim(),
             BareKey::Char('I') => {
                 self.open_menu(MenuKind::Input);
@@ -572,6 +573,7 @@ impl ZellijPlugin for Dashboard {
                             }
                             .into();
                             self.snapshot = Some(snapshot);
+                            self.refresh_queue_menu();
                             self.refresh_output();
                         }
                         Ok(_) => self.message = "Unsupported state schema version".into(),
