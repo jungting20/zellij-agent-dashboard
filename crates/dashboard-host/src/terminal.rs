@@ -35,6 +35,10 @@ pub trait TerminalHost {
         timeout: Duration,
     ) -> Result<Vec<TerminalPane>, String>;
     fn screen(&self, session: &SessionId, pane: &PaneId) -> Result<String, String>;
+    /// Styled viewport for composer detection; plain backends remain supported.
+    fn styled_screen(&self, session: &SessionId, pane: &PaneId) -> Result<String, String> {
+        self.screen(session, pane)
+    }
     fn write_text(&self, session: &SessionId, pane: &PaneId, text: &str) -> Result<(), String>;
     fn write_bytes(&self, session: &SessionId, pane: &PaneId, bytes: &[u8]) -> Result<(), String>;
     fn close_pane(&self, session: &SessionId, pane: &PaneId) -> Result<(), String>;

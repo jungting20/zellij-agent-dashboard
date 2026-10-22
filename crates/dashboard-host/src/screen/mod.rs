@@ -1,5 +1,6 @@
 //! Screen adapter ported from zellij-with-codeagent's codingagent detector.
 //! See docs/screen-adapter-provenance.md for source and licensing information.
+pub mod draft;
 mod regions;
 
 use dashboard_core::{Agent, StateSignal, Status, StatusObservation};

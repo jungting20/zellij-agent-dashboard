@@ -211,6 +211,21 @@ impl TerminalHost for ZellijCli<'_> {
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
+    fn styled_screen(&self, session: &SessionId, pane: &PaneId) -> Result<String, String> {
+        let bytes = self.action(
+            session,
+            vec![
+                "dump-screen".into(),
+                "--ansi".into(),
+                "--pane-id".into(),
+                format!("terminal_{}", pane_number(pane)?).into(),
+            ],
+            Duration::from_millis(500),
+            512 * 1024,
+        )?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
     fn write_text(&self, session: &SessionId, pane: &PaneId, text: &str) -> Result<(), String> {
         self.pane_action(session, pane, "write-chars", vec![text.into()])
     }

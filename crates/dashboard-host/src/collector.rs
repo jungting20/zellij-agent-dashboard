@@ -61,7 +61,6 @@ fn collect(deps: &HostDependencies, token: &str) -> Result<(), String> {
             a.liveness == Liveness::Live
                 && !a.ended
                 && a.pane.presence == PanePresence::Present
-                && a.status_source != StatusSource::Hook
                 && detector.supports(&a.tool)
                 && now_ms().saturating_sub(a.discovered_at_ms) >= 3000
         })
@@ -78,22 +77,32 @@ fn collect(deps: &HostDependencies, token: &str) -> Result<(), String> {
         // Capture start time rejects a slower sample that finishes after a newer
         // sample; identity is verified again after all terminal reads.
         let at = now_ms();
-        let signal = match deps.terminal.screen(
+        let signal = match deps.terminal.styled_screen(
             &SessionId(agent.identity.session_name.clone()),
             &pane_id(agent.identity.pane_id),
         ) {
-            Ok(text) if !text.trim().is_empty() => detector
-                .signal(
-                    &agent,
-                    &text,
-                    if fresh_metadata.contains(&agent.identity.agent_id) {
-                        &agent.pane.title
-                    } else {
-                        ""
-                    },
-                    at,
-                )
-                .unwrap(),
+            Ok(text) if !crate::screen::draft::plain(&text).trim().is_empty() => {
+                let plain = crate::screen::draft::plain(&text);
+                if let Some(has_input) = crate::screen::draft::detect(&agent.tool, &text) {
+                    signals.push(StateSignal::Draft {
+                        identity: agent.identity.clone(),
+                        observed_at_ms: at,
+                        has_input,
+                    });
+                }
+                detector
+                    .signal(
+                        &agent,
+                        &plain,
+                        if fresh_metadata.contains(&agent.identity.agent_id) {
+                            &agent.pane.title
+                        } else {
+                            ""
+                        },
+                        at,
+                    )
+                    .unwrap()
+            }
             result => StateSignal::Screen(StatusObservation {
                 identity: agent.identity.clone(),
                 tool: agent.tool.clone(),
@@ -110,7 +119,9 @@ fn collect(deps: &HostDependencies, token: &str) -> Result<(), String> {
             }),
         };
         attempts.push((agent.identity, at));
-        signals.push(signal);
+        if agent.status_source != StatusSource::Hook {
+            signals.push(signal);
+        }
     }
     let verified_at = now_ms();
     let verified = process::inventory(deps.runner)?;
@@ -162,6 +173,8 @@ mod tests {
         missing_pane: bool,
         metadata_fail: bool,
         reads: Cell<u32>,
+        draft: bool,
+        blank: bool,
     }
     impl Fake {
         fn inventory(&self) -> String {
@@ -250,8 +263,15 @@ mod tests {
             }
             if self.fail {
                 Err("screen unavailable".into())
+            } else if self.blank {
+                Ok("\x1b[39m\x1b[49m    \n\x1b[0m".into())
             } else {
-                Ok("• Thinking (3s • esc to interrupt)\n› ".into())
+                Ok(if self.draft {
+                    "• Thinking (3s • esc to interrupt)\n› 한글 draft"
+                } else {
+                    "• Thinking (3s • esc to interrupt)\n› "
+                }
+                .into())
             }
         }
         fn write_text(&self, _: &SessionId, _: &PaneId, _: &str) -> Result<(), String> {
@@ -281,7 +301,37 @@ mod tests {
             missing_pane: false,
             metadata_fail: false,
             reads: Cell::new(0),
+            draft: false,
+            blank: false,
         }
+    }
+
+    #[test]
+    fn hook_owned_agents_still_collect_drafts_without_screen_task_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fake = fake(dir.path());
+        fake.draft = true;
+        let identity = fake.seed();
+        {
+            let mut tx = fake.repository.begin().unwrap();
+            crate::repository::edit_fixture(&mut tx.store, |data| {
+                let agent = data.agents.get_mut(&identity.agent_id).unwrap();
+                agent.status_source = StatusSource::Hook;
+                agent.status = Status::Done;
+            });
+            tx.commit().unwrap();
+        }
+        let snapshot = scan(&fake.deps()).unwrap();
+        let agent = snapshot
+            .agents
+            .iter()
+            .find(|a| a.identity == identity)
+            .unwrap();
+        assert!(agent.has_draft);
+        assert_eq!(agent.status_source, StatusSource::Hook);
+        assert_eq!(agent.status, Status::Done);
+        assert_eq!(agent.last_screen_report_ms, None);
+        assert!(fake.reads.get() > 0);
     }
 
     #[test]
@@ -324,10 +374,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut fake = fake(dir.path());
         fake.hook = true;
+        fake.draft = true;
         let identity = fake.seed();
         scan(&fake.deps()).unwrap();
         let locked = crate::repository::at(dir.path()).begin().unwrap();
         let agent = &locked.store.agents[&identity.agent_id];
+        assert!(agent.has_draft);
         assert_eq!(agent.status_source, StatusSource::Hook);
         assert_eq!(agent.status, Status::Done);
         assert_eq!(agent.last_screen_report_ms, None);
@@ -355,6 +407,33 @@ mod tests {
     }
 
     #[test]
+    fn styled_blank_viewport_preserves_task_and_draft() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fake = fake(dir.path());
+        fake.blank = true;
+        let identity = fake.seed();
+        {
+            let mut tx = fake.repository.begin().unwrap();
+            crate::repository::edit_fixture(&mut tx.store, |data| {
+                let agent = data.agents.get_mut(&identity.agent_id).unwrap();
+                agent.status = Status::Working;
+                agent.has_draft = true;
+            });
+            tx.commit().unwrap();
+        }
+        let snapshot = scan(&fake.deps()).unwrap();
+        let agent = snapshot
+            .agents
+            .iter()
+            .find(|a| a.identity == identity)
+            .unwrap();
+        assert_eq!(agent.status, Status::Working);
+        assert!(agent.has_draft);
+        assert_eq!(agent.last_report_ms, None);
+        assert!(agent.last_screen_report_ms.is_some());
+    }
+
+    #[test]
     fn failed_screen_read_preserves_work_and_cancels_idle_confirmations() {
         let dir = tempfile::tempdir().unwrap();
         let mut fake = fake(dir.path());
@@ -364,6 +443,8 @@ mod tests {
             let mut locked = crate::repository::at(dir.path()).begin().unwrap();
             crate::repository::edit_fixture(&mut locked.store, |data| {
                 let agent = data.agents.get_mut(&identity.agent_id).unwrap();
+                agent.has_draft = true;
+                agent.draft_observed_at_ms = Some(1000);
                 agent.status = Status::Working;
                 agent.idle_confirmations = 2;
             });
@@ -372,6 +453,8 @@ mod tests {
         scan(&fake.deps()).unwrap();
         let locked = crate::repository::at(dir.path()).begin().unwrap();
         let agent = &locked.store.agents[&identity.agent_id];
+        assert!(agent.has_draft);
+        assert_eq!(agent.draft_observed_at_ms, Some(1000));
         assert_eq!(agent.status, Status::Working);
         assert_eq!(agent.idle_confirmations, 0);
         assert_eq!(agent.last_report_ms, None);

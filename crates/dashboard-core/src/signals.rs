@@ -29,6 +29,12 @@ pub struct StatusObservation {
 pub enum StateSignal {
     Hook(AgentEvent),
     Screen(StatusObservation),
+    /// Composer presence only; never changes task status or hook ownership.
+    Draft {
+        identity: Identity,
+        observed_at_ms: u64,
+        has_input: bool,
+    },
     Instruction {
         identity: Identity,
         observed_at_ms: u64,

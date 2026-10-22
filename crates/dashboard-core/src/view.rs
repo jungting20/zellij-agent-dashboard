@@ -558,7 +558,11 @@ impl View {
             number,
             if agent.pinned { "*" } else { " " }
         ))
-        .append(Line::plain(project).fit(project_width, true))
+        .append(if agent.has_draft {
+            Line::color(format!("[입력중] {project}"), PINNED, true).fit(project_width, true)
+        } else {
+            Line::plain(project).fit(project_width, true)
+        })
         .append(Line::plain("  "))
         .append(Line::color(status, color, false).fit(10, true))
         .append(Line::plain("  "))
@@ -863,6 +867,24 @@ mod tests {
             agent.pane.observed_at_ms = 1000;
         }
         store.snapshot(1000)
+    }
+
+    #[test]
+    fn draft_label_is_yellow_even_when_selected_and_keeps_status() {
+        let mut snapshot = populated();
+        snapshot.agents[0].has_draft = true;
+        let view = View::default();
+        let agent = &snapshot.agents[0];
+        for selected in [false, true] {
+            let row = view.agent_row(&snapshot, agent, 80, 0, selected).render();
+            assert!(row.contains("[입력중]"));
+            assert!(row.contains("\x1b[38;5;220m"));
+        }
+        snapshot.agents[0].has_draft = false;
+        assert!(!view
+            .agent_row(&snapshot, &snapshot.agents[0], 80, 0, false)
+            .render()
+            .contains("[입력중]"));
     }
 
     #[test]

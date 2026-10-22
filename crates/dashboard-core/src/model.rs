@@ -77,6 +77,10 @@ pub struct Agent {
     #[serde(default)]
     pub status_source: StatusSource,
     #[serde(default)]
+    pub has_draft: bool,
+    #[serde(default)]
+    pub draft_observed_at_ms: Option<u64>,
+    #[serde(default)]
     pub discovered_at_ms: u64,
     #[serde(default)]
     pub last_hook_report_ms: Option<u64>,
@@ -402,6 +406,31 @@ impl Store {
         match signal {
             StateSignal::Hook(event) => self.apply_hook(event),
             StateSignal::Screen(observation) => self.apply_screen(observation),
+            StateSignal::Draft {
+                identity,
+                observed_at_ms,
+                has_input,
+            } => {
+                let Some(agent) = self.data.agents.get_mut(&identity.agent_id) else {
+                    return Ok(ApplyResult::Ignored);
+                };
+                if agent.identity != *identity
+                    || agent.ended
+                    || agent.liveness != Liveness::Live
+                    || agent
+                        .draft_observed_at_ms
+                        .is_some_and(|at| *observed_at_ms <= at)
+                    || *observed_at_ms < agent.discovered_at_ms
+                {
+                    return Ok(ApplyResult::Ignored);
+                }
+                agent.has_draft = *has_input;
+                agent.draft_observed_at_ms = Some(*observed_at_ms);
+                self.changes.agents.insert(identity.agent_id.clone());
+                self.data.revision += 1;
+                self.changes.metadata = true;
+                Ok(ApplyResult::Applied)
+            }
             StateSignal::Instruction {
                 identity,
                 observed_at_ms,
@@ -662,6 +691,8 @@ impl Store {
                 .agents
                 .entry(process.identity.agent_id.clone())
                 .or_insert_with(|| Agent {
+                    has_draft: false,
+                    draft_observed_at_ms: None,
                     status_source: StatusSource::Unknown,
                     discovered_at_ms: now_ms,
                     last_hook_report_ms: None,
@@ -1105,6 +1136,63 @@ mod tests {
             recovered.agents["replacement"].status_source,
             StatusSource::Unknown
         );
+    }
+
+    #[test]
+    fn drafts_are_independent_of_hooks_and_reject_old_or_replaced_runs() {
+        let mut store = Store::default();
+        store.reconcile(&[found("run")], 1000);
+        store
+            .apply(&event("run", 1, EventKind::TurnStarted))
+            .unwrap();
+        let identity = store.agents["run"].identity.clone();
+        let draft = |at, has_input| StateSignal::Draft {
+            identity: identity.clone(),
+            observed_at_ms: at,
+            has_input,
+        };
+        assert_eq!(
+            store.apply_signal(&draft(5000, true)).unwrap(),
+            ApplyResult::Applied
+        );
+        let agent = &store.agents["run"];
+        assert!(agent.has_draft);
+        assert_eq!(agent.status_source, StatusSource::Hook);
+        assert_eq!(agent.status, Status::Working);
+        assert_eq!(
+            store.apply_signal(&draft(5000, false)).unwrap(),
+            ApplyResult::Ignored
+        );
+        assert_eq!(
+            store.apply_signal(&draft(4000, false)).unwrap(),
+            ApplyResult::Ignored
+        );
+        let mut restored: Store =
+            serde_json::from_str(&serde_json::to_string(&store).unwrap()).unwrap();
+        assert!(restored.agents["run"].has_draft);
+        restored.reconcile(&[found("run")], 6000);
+        assert_eq!(
+            restored.apply_signal(&draft(7000, false)).unwrap(),
+            ApplyResult::Applied
+        );
+        assert!(!restored.agents["run"].has_draft);
+        store.reconcile(&[found("new")], 8000);
+        assert_eq!(
+            store.apply_signal(&draft(9000, true)).unwrap(),
+            ApplyResult::Ignored
+        );
+        assert!(!store.agents["new"].has_draft);
+        let mut value = serde_json::to_value(&store).unwrap();
+        for agent in value["agents"].as_object_mut().unwrap().values_mut() {
+            agent.as_object_mut().unwrap().remove("has_draft");
+            agent
+                .as_object_mut()
+                .unwrap()
+                .remove("draft_observed_at_ms");
+        }
+        let legacy: Store = serde_json::from_value(value).unwrap();
+        assert!(!legacy.agents["new"].has_draft);
+        assert_eq!(legacy.agents["new"].draft_observed_at_ms, None);
     }
 
     #[test]
