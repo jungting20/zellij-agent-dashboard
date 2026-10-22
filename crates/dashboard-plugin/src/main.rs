@@ -2,13 +2,13 @@
 fn main() {}
 
 #[cfg(target_arch = "wasm32")]
-use zellij_tile::prelude::*;
-
+mod entrypoints;
+#[cfg(any(target_arch = "wasm32", test))]
+mod events;
 #[cfg(target_arch = "wasm32")]
 mod plugin;
 
 #[cfg(target_arch = "wasm32")]
-use plugin::Dashboard;
-
-#[cfg(target_arch = "wasm32")]
-register_plugin!(Dashboard);
+fn main() {
+    entrypoints::initialize();
+}

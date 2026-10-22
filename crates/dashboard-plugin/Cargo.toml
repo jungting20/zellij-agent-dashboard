@@ -11,3 +11,6 @@ serde_json.workspace = true
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 zellij-tile = "=0.45.0"
 zellij-utils = { version = "=0.45.0", default-features = false }
+
+[dev-dependencies]
+zellij-tile = "=0.45.0"

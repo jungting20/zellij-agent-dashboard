@@ -300,3 +300,16 @@ Codex/Claude composer 어댑터와 독립 `Draft` 신호를 추가했다. 대시
 실제 Zellij 0.45.0의 임시 세션 `zad-draft-2c3b0208`에서 raw 입력을 받는 Codex 화면 fixture로 한국어 미전송 입력·다른 pane(대시보드)으로 포커스를 옮긴 뒤 표시·노란색 ANSI·collector reload·삭제/전송 후 해제·훅 연결 뒤 working 상태를 보존하면서 표시/해제를 확인했다. `.local/draft-highlight-ac6720c8/result.json`에 13개 통과 결과를, 같은 폴더에 터미널 출력과 표시 당시 ANSI를 보존했다. 재현 스크립트는 `.local/verify-draft-highlight.py`이며 `uv run --with pyte python .local/verify-draft-highlight.py`로 실행했다. `dump-screen`은 플러그인 pane에서 빈 값을 반환하므로 PTY 출력을 연속 해석해 검증했다. 초기 검증 도구의 빈 플러그인 dump, pyte private device-status 처리 및 출력 앞부분 잘림 문제를 보완했다. 임시 세션과 해당 종료 기록은 정리했다. 실제 Claude 제공자 대화와 Cursor/Gemini/Hermes/Pi composer 감지는 이번 실검증 범위에 포함하지 않는다. 전체 기존 smoke는 재실행하지 않았다.
 
 검증 후 `bash scripts/build.sh`, `bash scripts/install.sh`를 실행하고 사용자가 지정한 실행 중인 모든 세션 `study`, `loop`, `asbplayer`, `운영`, `hermes`, `zellij-with-code-agent`, `rea`의 collector를 reload했다. 7개 모두 기존 plugin ID 유지·중복 없음·permissions=true·error=null·Connected·reload 후 poll/revision 증가를 확인했다. 적용 당시 열린 대시보드는 없었으며 다음 열기부터 설치된 새 WASM을 사용한다. 설치 파일과 dist 해시는 일치한다. 기존 연결은 유지하고 검증용 attach 클라이언트만 종료했다. 결과는 `.local/apply-draft-highlight-all.json`, 실제 Codex 실행 5개의 composer 관측과 미지원 Cursor 실행의 기본값 확인은 `.local/draft-live-observations.json`에 기록했다. 설치 전 SQLite 온라인 백업과 이전 host/WASM은 `.local/draft-highlight-backup-20261022-165820`에 보존했다.
+
+
+## 2026-10-22 입력창 한글 키 이벤트 손상 수정
+
+Zellij 0.45.0의 `zellij-utils::plugin_api::key::char_index_to_char`는 protobuf의 유니코드 정수를 `as u8 as char`로 변환한다. 실제 임시 세션의 기존 WASM에서 `i`를 누르고 PTY로 `한글`을 입력하면 `한`은 `\`로, `글`은 NUL로 변환되어 최종 입력은 `\`만 남는 것을 재현했다. 붙여넣기는 별도 `PastedText` 경로여서 이 문제와 구분한다.
+
+플러그인의 SDK 진입점을 유지하면서 이벤트 수신 경계에서 원래 유니코드 스칼라를 복원한다. 수정 범위는 Key 이벤트의 문자 값이며 modifier·명명 키·다른 이벤트는 SDK 변환을 유지한다. 잘못된 스칼라는 이벤트를 거부한다. SDK 등록 매크로에서 가져온 진입점의 출처와 MIT 고지는 `crates/dashboard-plugin/src/entrypoints.rs`와 `crates/dashboard-plugin/notices/zellij-tile-LICENSE.md`에 보존했다. 상태 파일 구조와 버전은 변경하지 않았다.
+
+`bash scripts/check.sh`의 포맷, workspace 테스트(코어 47개·호스트 66개·플러그인 3개 통과, 기존 수동 성능 검사 1개 ignored), native/WASI Clippy와 스크립트 검사를 통과했다. protobuf 직렬화/역직렬화의 한글 완성형·자모·일본어·이모지·ASCII·modifier·명명 키·붙여넣기·다른 이벤트와 잘못된 스칼라를 검증한다.
+
+실제 Zellij 0.45.0 임시 세션 `zad-draft-14764529`에서 새 release WASM으로 `i` 입력과 예약, 한글·일본어·이모지 원문 보존, 한글 Backspace 후 재입력(`가나` → `가다`), 한국어 여러 줄 bracketed paste, 한글 검색을 확인했다. 예약 원문 세 개와 14개 확인 항목은 `.local/draft-highlight-beb018ef/result.json`에 기록했다. 재현 스크립트는 `.local/verify-korean-input.py`이며 임시 세션은 종료했다. macOS 입력기의 실제 조합 중 화면은 자동 검증 범위에 포함하지 않는다. 전체 smoke는 재실행하지 않았다.
+
+검증 후 `bash scripts/build.sh`와 `bash scripts/install.sh`로 host와 WASM을 빌드·설치했다. 이전 설치본은 `.local/unicode-input-backup-20261022-172516`에 보존했다. 현재 작업 대상 `loop`의 collector를 reload하고 기존 plugin ID 유지·중복 없음·permissions=true·error=null·Connected와 poll/revision 증가를 확인했다. 기존 열린 dashboard는 없었다. 설치된 동일 별칭으로 검증용 dashboard를 열어 실제 PTY 한글 검색 값 `한글`을 확인한 뒤 해당 검증 pane만 닫았다. 임시 클라이언트도 종료했다. dist와 설치 파일 SHA-256 일치 및 적용 기록은 `.local/apply-unicode-input-loop.json`에 있다. 다른 세션에는 reload하지 않았다.
