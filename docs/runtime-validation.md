@@ -364,3 +364,18 @@ Zellij 0.45.0의 `zellij-utils::plugin_api::key::char_index_to_char`는 protobuf
 
 
 사용자의 전체 세션 적용 요청에 따라 실행 중인 `study`, `loop`, `asbplayer`, `운영`, `hermes`, `zellij-with-code-agent`, `rea` 7개 세션의 collector에 동일한 한글 입력 수정본을 reload했다. dist와 설치 host/WASM의 SHA-256 일치를 확인했고, 각 세션의 기존 plugin ID 0 유지·중복 없음·permissions=true·error=null·Connected와 reload 후 poll/revision 증가를 검증했다. 열린 dashboard는 없어 다음 열기부터 반영된다. 기존 클라이언트는 유지했고 검증용 임시 attach 클라이언트는 종료했다. 최종 실행 세션과 적용 범위, pane 및 클라이언트 재조회 결과는 `.local/apply-unicode-input-all.json`에 기록했다.
+
+
+## 2026-10-23 대시보드 스크롤 누적과 목록 이동 지연 수정
+
+임시 Zellij 0.45.0 세션에서 키 입력 없이 약 15초 동안 대시보드 프레임의 `SCROLL: 0/457` 증가를 재현했다. 기존 렌더는 마지막 화면 행에도 줄바꿈을 출력했다. 화면 원점을 지정하고 이전 화면을 지운 뒤 행 사이에만 CRLF를 출력하도록 대시보드·알림·초기/오류 화면의 출력 경로를 통일했다. 세션·모드·클라이언트 메타데이터와 진단 ping은 재그리기를 요청하지 않는다.
+
+목록 선택은 즉시 반영하고, 선택이 바뀐 경우에만 80ms 후 출력 미리보기를 조회한다. 연속 이동은 마지막 선택으로 합치며 이전 실행의 늦은 미리보기는 기존 대상 검증으로 버린다. 미리보기 타이머와 2초 상태 조회 기한을 구분해 키 입력이 주기 조회를 늘리지 않도록 했다. 상태 파일 구조와 버전은 유지한다.
+
+`bash scripts/check.sh`의 포맷, workspace 테스트(코어 49개·호스트 68개·플러그인 6개 통과, 기존 수동 성능 테스트 1개 ignored), native/WASI Clippy, 스크립트 검사를 통과했다. 마지막 행 줄바꿈 금지·높이 제한·이전 내용 지우기·ANSI 보존을 플러그인 테스트로 확인했다. `bash scripts/build.sh`로 최종 host/WASM을 빌드했다.
+
+실제 임시 세션에서 에이전트 fixture 3개를 발견하고 21번 연속 j/k 이동이 미리보기 명령 1개로 합쳐지는 것, 마지막 선택과 미리보기 일치, 2초 조회 유지, 폭 40·80·120에서 선택 보존, 10초 대기 후 대시보드 프레임에 SCROLL 없음까지 확인했다. PTY와 pyte로 대시보드 프레임을 확인했으며 fixture terminal의 기존 스크롤과 구분했다. 결과는 `.local/scroll-navigation-3ffe06e7/result.json`, 화면은 같은 폴더의 `screen.txt`, 검증 도구는 `.local/verify-scroll-navigation.py`다. 별도 빈 대시보드의 15초 대기에서도 스크롤이 없었다(`.local/render-scroll-c147e653/result.json`). 최초 검증 도구의 레이아웃 문법, PTY 시작 크기 경쟁, 반환값과 fixture 스크롤 오인 조건을 보완한 뒤 통과했다. 임시 세션은 종료했으며 전체 기존 smoke는 이번에 재실행하지 않았다.
+
+`bash scripts/install.sh`로 설치하고 이 저장소의 실행 대상 `zellij-with-code-agent` 세션 collector를 reload했다. 기존 plugin ID 69 유지, 권한 승인·오류 없음·Connected·poll 1→2를 확인했다. 적용 당시 열린 대시보드는 없었으며, 설치 별칭으로 검증용 대시보드를 열어 j/k 이동·마지막 미리보기와 7초 대기 후 SCROLL 없음을 확인하고 해당 pane만 닫았다. 검증용 attach 클라이언트는 종료했고 다른 세션은 reload하지 않았다. 설치 파일과 dist의 host/대시보드/알림 WASM 해시는 일치한다. 적용 결과는 `.local/apply-scroll-navigation.json`, 이전 설치본은 `.local/scroll-navigation-backup-20261023-171607`에 보존했다.
+
+사용자의 전체 세션 적용 요청에 따라 실행 중인 `zellij-with-code-agent`, `study`, `운영` 3개 세션에 동일 수정본을 reload했다. 적용 도중 새로 시작된 `study`와 재시작된 `운영`도 새 실행 상태에서 다시 적용했다. 각 세션에서 기존 collector ID 유지·권한 승인·오류 없음·Connected·poll 증가, 설치 별칭 대시보드의 마지막 선택 미리보기와 대기 후 SCROLL 없음을 확인했다. 최초 목록의 열린 대시보드는 적용 시점에 이미 닫혀 있었으며 검증용 pane만 생성·종료했다. 기존 클라이언트는 유지하고 검증용 attach만 종료했다. 마지막 실행 세션 목록과 적용 목록 일치·collector 중복 없음·설치 해시 일치를 확인했다. 종료된 세션은 복원하지 않았으며 이후 실행에서는 설치본을 사용한다. 통합 결과는 `.local/apply-scroll-all.json`이다.

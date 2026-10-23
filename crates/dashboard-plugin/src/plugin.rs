@@ -32,6 +32,8 @@ pub struct Dashboard {
     config_error: Option<String>,
     output_pending: bool,
     output_dirty: bool,
+    preview_due: Option<std::time::Instant>,
+    poll_due: Option<std::time::Instant>,
     pin_pending: bool,
     next_queue: dashboard_core::NextQueue,
     next_pending: bool,
@@ -222,6 +224,7 @@ fi"#,
             self.output_dirty = true;
             return;
         }
+        self.output_dirty = false;
         self.output_pending = true;
         self.host("preview", Some(&agent.identity.agent_id), "output");
     }
@@ -249,6 +252,7 @@ fi"#,
     }
 
     fn key(&mut self, key: KeyWithModifier) {
+        let previous_selection = self.view.selected_id.clone();
         if self.view.menu.is_some() {
             self.menu_key(key);
             return;
@@ -373,7 +377,15 @@ fi"#,
             }
             _ => {}
         }
-        self.refresh_output();
+        if self.view.selected_id != previous_selection {
+            self.view.output = None;
+            let already_scheduled = self.preview_due.is_some();
+            self.preview_due =
+                Some(std::time::Instant::now() + std::time::Duration::from_millis(80));
+            if !already_scheduled {
+                set_timeout(0.08);
+            }
+        }
     }
 }
 
@@ -425,6 +437,7 @@ impl ZellijPlugin for Dashboard {
         set_selectable(true);
         // Hiding after requesting permissions would hide the grant dialog too.
         self.request_permissions();
+        self.poll_due = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
         set_timeout(2.0);
     }
 
@@ -456,14 +469,27 @@ impl ZellijPlugin for Dashboard {
                 }
             }
             Event::Timer(_) => {
-                // A cached grant can arrive before the first client attaches.
-                // Retry pending requests, but respect an explicit denial.
-                if !self.permissions && !self.denied {
-                    self.request_permissions();
+                let now = std::time::Instant::now();
+                if self.poll_due.is_some_and(|due| now >= due) {
+                    // Preview timers must not multiply the periodic polling loop.
+                    self.poll_due = Some(now + std::time::Duration::from_secs(2));
+                    if !self.permissions && !self.denied {
+                        self.request_permissions();
+                    }
+                    self.refresh();
+                    self.action_timer();
+                    set_timeout(2.0);
                 }
-                self.refresh();
-                self.action_timer();
-                set_timeout(2.0);
+                if let Some(due) = self.preview_due {
+                    if now >= due {
+                        self.preview_due = None;
+                        self.refresh_output();
+                    } else {
+                        set_timeout(due.duration_since(now).as_secs_f64());
+                    }
+                }
+                // Commands update the visible state when their results arrive.
+                return false;
             }
             Event::Visible(true) if !self.collector => self.refresh(),
             Event::ModeUpdate(info) => {
@@ -472,6 +498,7 @@ impl ZellijPlugin for Dashboard {
                 }
                 self.start_next(None);
                 self.start_window();
+                return false;
             }
             Event::SessionUpdate(sessions, _) => {
                 if let Some(session) = sessions.iter().find(|s| s.is_current_session) {
@@ -479,10 +506,12 @@ impl ZellijPlugin for Dashboard {
                 }
                 self.start_next(None);
                 self.start_window();
+                return false;
             }
             Event::ListClients(clients) => {
                 self.window_clients(&clients);
                 self.navigation_clients(clients);
+                return false;
             }
             Event::Key(key) if !self.collector && !self.notification => self.key(key),
             Event::PastedText(text) if !self.collector && !self.notification => {
@@ -590,7 +619,9 @@ impl ZellijPlugin for Dashboard {
                                 );
                             }
                             self.refresh_queue_menu();
-                            self.refresh_output();
+                            if self.preview_due.is_none() {
+                                self.refresh_output();
+                            }
                         }
                         Ok(_) => self.message = "Unsupported state schema version".into(),
                         Err(e) => self.message = format!("Invalid host response: {e}"),
@@ -639,7 +670,7 @@ impl ZellijPlugin for Dashboard {
                     self.dirty = false;
                     self.refresh();
                 }
-                if kind == "output" && self.output_dirty {
+                if kind == "output" && self.output_dirty && self.preview_due.is_none() {
                     self.output_dirty = false;
                     self.refresh_output();
                 }
@@ -726,40 +757,29 @@ impl ZellijPlugin for Dashboard {
             }
             _ => return false,
         }
-        !self.collector
+        // Pipe requests only start asynchronous work or report diagnostics.
+        false
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
-        if let Some(error) = self.config_error.as_ref() {
-            println!(
-                "{}",
-                dashboard_core::view::truncate(error, cols.saturating_sub(1))
-            );
+        if self.collector && self.permissions && self.config_error.is_none() {
             return;
         }
-        if self.collector && self.permissions {
-            return;
-        }
-        if self.notification {
-            for line in self.notification_content.render(rows, cols) {
-                println!("{line}");
-            }
-            return;
-        }
-        match self.snapshot.as_ref() {
-            Some(snapshot) => {
-                for line in self.view.render(snapshot, rows, cols, &self.message) {
-                    println!("{line}");
-                }
-            }
-            None => {
-                for line in ["Agent Dashboard", self.message.as_str()] {
-                    println!(
-                        "{}",
-                        dashboard_core::view::truncate(line, cols.saturating_sub(1))
-                    );
-                }
-            }
-        }
+        let lines = if let Some(error) = self.config_error.as_ref() {
+            vec![dashboard_core::view::truncate(
+                error,
+                cols.saturating_sub(1),
+            )]
+        } else if self.notification {
+            self.notification_content.render(rows, cols)
+        } else if let Some(snapshot) = self.snapshot.as_ref() {
+            self.view.render(snapshot, rows, cols, &self.message)
+        } else {
+            ["Agent Dashboard", self.message.as_str()]
+                .into_iter()
+                .map(|line| dashboard_core::view::truncate(line, cols.saturating_sub(1)))
+                .collect()
+        };
+        print!("{}", crate::render::frame(&lines, rows));
     }
 }
