@@ -17,7 +17,11 @@ rustup target add wasm32-wasip1 --toolchain 1.88.0
 
 클라이언트가 연결된 실행 중인 세션을 지정한다. Zellij 안에서는 세션 이름을 생략할 수 있다. 처음 로드할 때 표시되는 플러그인 권한을 승인하면 수집을 시작한다. 수집기는 화면 pane을 닫아도 남는다. 스크립트는 지정한 세션에만 수집기와 화면을 로드하며 사용자 Zellij 설정을 수정하지 않는다.
 
+`n`으로 생성하는 에이전트(자식 worktree 에이전트 포함)는 도구별 전체 권한 옵션으로 실행한다. Codex는 `--dangerously-bypass-approvals-and-sandbox`, Cursor는 `--force --sandbox disabled --approve-mcps --trust`, Claude와 agy는 `--dangerously-skip-permissions`, Hermes는 `--yolo`를 사용한다. Pi는 `--approve`로 프로젝트 파일을 신뢰한다. Pi 확장 기능이 별도로 요구하는 승인은 이 옵션의 대상이 아니다. 기존 실행에는 소급 적용되지 않는다.
+
 목록은 현재 pane이 확인된 실행만 표시하며 종료 기록과 Codex app-server는 제외한다. 상태는 훅이 연결되지 않은 실행에서 화면으로 판별한다. Claude 훅을 연결하면 해당 실행은 훅 경로로 전환한다. 별도 설정 파일을 생성해 Zellij pane 안의 Claude 실행에 적용한다.
+
+`waiting` 실행이 있으면 collector가 각 탭 오른쪽 위에 40열 × 4행 알림창을 띄운다. 전체 세션의 대기 개수와 도구·세션·탭을 표시하고, 대기가 모두 해소되거나 실행이 종료되면 닫는다. 알림은 입력 포커스를 가져가지 않는 테두리 없는 pinned floating pane이다. `agent-notification.wasm`은 collector가 전달하는 요약만 표시하며 별도 권한이나 수집기를 요구하지 않는다. 터미널 크기가 바뀌면 다음 갱신에 오른쪽 끝으로 정렬한다. 설치할 때는 host와 두 WASM 파일을 함께 설치한다.
 
 ```sh
 mkdir -p .local
@@ -104,10 +108,12 @@ load_plugins {
 | 키 | payload | 대상 |
 |---|---|---|
 | `Alt u` | `pinned-only` | 고정 |
-| `Alt i` | `idle-and-pinned` | idle이면서 고정 |
+| `Alt i` | `idle-and-pinned` | 고정 waiting 우선, 없으면 idle |
 | `Alt o` | `unpinned-only` | 일반 |
-| `Alt p` | `idle-and-unpinned` | idle이면서 일반 |
+| `Alt p` | `idle-and-unpinned` | 일반 waiting 우선, 없으면 idle |
 | `Alt w` | `non-idle` | idle 이외 전체 · 고정 여부 무관 |
+
+`Alt i`/`Alt p`는 해당 패널의 `waiting`을 먼저 순환한다. `waiting`이 없으면 이전 상태와 관계없이 가장 최근 idle로 전환한 순서로 idle을 순환한다.
 
 `Alt w`는 고정·일반 패널 모두에서 `idle` 이외의 상태(`working`, `waiting`, `compact`, `done`, `failed`, `found`)인 실행을 순환한다. 종료되거나 pane이 없거나 생존이 확인되지 않은 실행은 제외한다. `all`, `working-only` payload도 지원하며 대시보드 `Tab`은 기존처럼 working만 선택한다. 대상 지정 없이 브로드캐스트한 `agent-next`는 무시하고 collector를 지정한 private 메시지만 처리한다. 화면 인스턴스는 이동 요청을 처리하지 않는다. Zellij 0.45.0의 키 메시지는 여러 클라이언트 인스턴스로 전달되므로 연결된 최소 ID 클라이언트만 처리하고 다른 인스턴스는 요청을 버린다. 다중 클라이언트에서는 처리 클라이언트의 초점만 이동하며, 키를 누른 클라이언트 식별자는 메시지 계약에 없다. 연속 키는 순서대로 처리한다. 활성 config.kdl의 키바인딩 변경은 파일 감시로 실행 중 세션에도 반영된다. 플러그인 별칭 위치 변경은 세션 재시작이 필요하며 설치·reload할 때는 대상을 명시한다.
 

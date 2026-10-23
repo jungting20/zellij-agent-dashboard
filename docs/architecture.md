@@ -4,6 +4,16 @@ Zellij 서버가 백그라운드 수집기를 실행한다. 화면 pane과 수�
 
 ## 실행 경로
 
+### Waiting 알림
+
+collector는 snapshot 조회 성공 후 현재 세션을 지정해 유한한 `dashboard-host sync-notification SESSION`을 호출한다. 이 명령은 상태 디렉터리의 세션별 `notification-window-*.lock`을 잠근 뒤 최신 스냅샷을 읽고, 도달 가능한 live waiting 실행이 있으면 각 탭에 알림 plugin pane을 하나 유지한다. 대기가 없어지면 해당 URL의 알림만 닫고 중복 창도 정리한다. 저장소 트랜잭션을 잡은 채 Zellij를 호출하지 않는다. 종료·실패 시 OS가 파일 잠금을 해제하므로 다음 collector tick에 복구한다.
+
+`agent-notification.wasm`은 같은 WASI 바이너리의 `mode=notification`이다. collector가 호스트를 통해 보내는 제한된 요약(개수와 최대 세 항목)만 수신·표시하며 직접 저장소 조회, 호스트 명령, 권한 요청, 타이머 수집을 실행하지 않는다. 대시보드와 URL을 분리해 기존 대시보드 열기/닫기 경로와 혼동하지 않는다. 상태 DB 스키마는 4로 유지하며 추가 도메인 상태를 저장하지 않는다. 알림 복구는 다음 tick에 현재 pane과 snapshot을 재조회하는 방식이다.
+
+현재 세션 이름은 `ModeUpdate`와 `SessionUpdate` 이벤트에서 갱신한다. 세션 이름을 알기 전에는 창 열기와 순환 이동 요청을 보류한다. SDK의 동기 `get_session_list()`는 일부 기존 서버에서 응답 decode 중 panic을 일으켜 사용하지 않는다. WASM에서 panic 후 RefCell 대여가 남아 후속 이벤트가 연쇄 실패하는 경로를 피한다.
+
+### 기존 수집 경로
+
 ```text
 Claude 훅 ── dashboard-host hook ── 공유 SQLite 저장소
                  │                     ↑
@@ -130,11 +140,11 @@ Zellij 0.45.0은 연결된 클라이언트가 없을 때 plugin reload를 거부
 
 ## 다음 에이전트 탐색
 
-같은 WASM의 collector가 전역 키의 `agent-next` 메시지를 처리한다. 화면 인스턴스는 처리하지 않는다. 필터와 순환 선택은 순수 코어의 `NextFilter`와 `View::next_agent`에 두며, 호스트 `next`는 `{filter, session, pane_id}` JSON을 받아 최신 수집 상태에서 후보를 찾고 정확한 실행 identity와 pane을 재검증한다. 결과는 검증한 Agent 또는 JSON `null`이다. 조회 중 사라지거나 교체된 후보는 제외한다. 고정 여부는 화면의 부모 상속과 같으며 idle은 정확히 `Status::Idle`, working은 정확히 `Status::Working`이다. `Alt w`의 `non-idle` 필터는 살아 있고 표시 가능한 실행 중 `Status::Idle`만 제외한다.
+같은 WASM의 collector가 전역 키의 `agent-next` 메시지를 처리한다. 화면 인스턴스는 처리하지 않는다. 필터와 순환 선택은 순수 코어의 `NextFilter`와 `View::next_agent`에 두며, 호스트 `next`는 `{filter, session, pane_id}` JSON을 받아 최신 수집 상태에서 후보를 찾고 정확한 실행 identity와 pane을 재검증한다. 결과는 검증한 Agent 또는 JSON `null`이다. 조회 중 사라지거나 교체된 후보는 제외한다. 고정 여부는 화면의 부모 상속과 같으며 idle 전용 필터는 `Status::Waiting`과 `Status::Idle`을 포함하고, working은 정확히 `Status::Working`이다. `Alt w`의 `non-idle` 필터는 살아 있고 표시 가능한 실행 중 `Status::Idle`만 제외한다.
 
-`idle-and-pinned`와 `idle-and-unpinned`는 일치하는 후보만 `Agent.working_to_idle_at_ms` 내림차순으로 안정 정렬한 뒤 현재 후보 다음부터 순환한다. 현재 실행이 후보가 아니면 최신 후보에서 시작한다. 다른 필터는 기존 표시 순서와 기준 행을 유지한다. 시각은 코어가 실제로 수락한 `working → idle` 전환 때만 갱신하며, 화면 경로는 idle 연속 확인이 완료된 관측 시각을 기록한다. 반복 idle·중복·역순·무시한 화면 결과는 갱신하지 않는다. 이 시각은 최대 50건인 활동 목록과 별도로 저장하므로 이력 잘림이나 reload로 유실되지 않으며 새 실행 세대는 초기화한다.
+`idle-and-pinned`와 `idle-and-unpinned`는 해당 패널의 유효한 waiting 실행이 있으면 waiting만 표시 순서로 순환한다. waiting이 없으면 idle 후보를 `Agent.status_since_ms` 내림차순으로 안정 정렬한 뒤 현재 후보 다음부터 순환한다. 현재 실행이 후보가 아니면 최신 후보에서 시작한다. 다른 필터는 기존 표시 순서와 기준 행을 유지한다.
 
-이 필드는 하위 호환 가능한 선택적 필드로 추가하며 DB 구조 버전 2·도메인/스냅샷 스키마 4·이벤트 JSON 1을 유지한다. 기존 Agent JSON에서 필드가 없으면 `None`이고 전환 기록이 없는 후보로 후순위에 둔다. 과거 전환을 추정하거나 복원하지 않는다. 다음 유효한 `working → idle`부터 시각이 기록된다. 같은 시각·기록 없음끼리는 표시 순서를 유지한다. 별도 DB 이관이나 수동 복구는 필요 없다. 현재 스키마 4에서 구버전 host로 롤백할 때는 앞서 설명한 업그레이드 전 DB 백업을 복원한다.
+idle 순환 시각은 코어가 수락한 현재 상태의 시작 시각이다. `working → idle`뿐 아니라 `waiting → idle`, `found → idle` 등 모든 idle 전환이 반영된다. 화면 경로는 필요한 idle 연속 확인이 완료된 관측 시각을 사용한다. 반복 idle·중복·역순·무시한 화면 결과는 시각을 갱신하지 않는다. 같은 시각은 표시 순서를 유지한다. 기존 저장 필드 `status_since_ms`를 사용하므로 reload에도 보존되며 DB 구조 버전 2·도메인/스냅샷 스키마 4·이벤트 JSON 1을 유지한다. 별도 이관은 필요 없다. 기존 `working_to_idle_at_ms`는 호환성을 위해 유지하지만 이동 정렬에는 사용하지 않는다.
 
 Zellij 0.45.0은 전역 키 메시지를 여러 클라이언트 인스턴스로 전달하고 키 입력자의 ID를 제공하지 않는다. `ListClients`로 연결된 최소 ID 클라이언트 하나만 처리하도록 선출하고 나머지 및 detach된 인스턴스는 큐를 버린다. 처리 클라이언트의 실제 초점 pane은 클라이언트 목록에서, 세션 이름은 현재 세션 목록에서 조회한다. 같은 세션은 pane 초점을 변경하고 다른 세션은 기존 세션 이동 API를 사용한다. 연속 요청은 앞선 결과를 기준으로 순서대로 탐색한다. 대기 큐는 인스턴스당 최대 32건이며 초과 입력은 버린다. 권한 거절이나 호스트 응답 지연 중에도 이 상한을 유지하고, 기존 승인 요청의 순서는 보존한다. 대시보드 `Tab`은 검색 결과의 양쪽 패널에서 working 실행만 선택하며 pane 이동은 `Enter`로 요청한다. 탐색 큐와 초점 관측은 플러그인 수명에 속하고 저장하지 않으므로 Store/스냅샷 4·DB 구조 2·이벤트 1을 유지한다. reload 뒤에는 실제 초점과 저장된 상태를 다시 읽는다.
 

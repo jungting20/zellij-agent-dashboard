@@ -230,6 +230,9 @@ load_plugins {{
         source = directory / "codex.rs"
         source.write_text(r'''use std::io::{BufRead, Write};
 fn main() {
+    if std::env::var_os("ZAD_LAUNCH_ID").is_some() {
+        std::fs::write("launch-args.log", std::env::args().skip(1).collect::<Vec<_>>().join("\n")).unwrap();
+    }
     println!("fixture ready\n› ");
     let mut log = std::fs::OpenOptions::new().create(true).append(true).open("input.log").unwrap();
     for line in std::io::stdin().lock().lines() {
@@ -344,6 +347,27 @@ fn main() {
                          and a["identity"]["pane_id"] == launched["pane_id"] and a["liveness"] == "live"), None)
         agent = wait_for("host adapter creates and discovers pane once", launched_agent)
         wait_for("host adapter reads pane screen", lambda: "fixture ready" in host_call("preview", agent["identity"]["agent_id"])["text"])
+        assert (command_dir / "launch-args.log").read_text() == "--dangerously-bypass-approvals-and-sandbox"
+        print("PASS launched pane receives full-permission argv", flush=True)
+        # Inspect argv received inside real Zellij panes for every supported tool.
+        for tool, executable, expected in (
+            ("cursor", "agent", ["--force", "--sandbox", "disabled", "--approve-mcps", "--trust"]),
+            ("claude", "claude", ["--dangerously-skip-permissions"]),
+            ("gemini", "agy", ["--dangerously-skip-permissions"]),
+            ("hermes", "hermes", ["--yolo"]),
+            ("pi", "pi", ["--approve"]),
+        ):
+            shutil.copy2(fake, directory / executable)
+            argv_log = command_dir / "launch-args.log"
+            argv_log.unlink()
+            result = host_action({"request_id": "permission-" + tool,
+                                  "action": {**launch_request["action"], "tool": tool}})
+            assert result["state"] == "succeeded", result
+            try:
+                wait_for(tool + " full-permission argv", lambda: argv_log.exists()
+                         and argv_log.read_text().splitlines() == expected)
+            finally:
+                call(first, "action", "close-pane", "--pane-id", "terminal_" + str(result["pane_id"]))
         input_request = {"request_id": "adapter-input", "action": {"kind": "input", "target": agent["identity"], "text": "한글 첫 줄\nsecond line"}}
         assert host_action(input_request)["state"] == "succeeded"
         assert host_action(input_request)["state"] == "succeeded"
@@ -421,6 +445,16 @@ fn main() {
         wait_for("global idle-and-pinned skips working agent", lambda: client_panes(first).get(tab_client) == fixture_pane)
         show_fixture(":waiting")
         wait_for("waiting fixture for non-idle navigation", lambda: current_screen_row()["status"] == "waiting")
+        call(first, "action", "focus-pane-id", fixture_pane)
+        os.write(clients[0].fd, b"\x1bi")
+        wait_for("idle navigation prioritizes waiting over idle", lambda: client_panes(first).get(tab_client)
+                 == f'terminal_{screen_row["identity"]["pane_id"]}')
+        before_messages = max(p["next_messages"] for p in ping(first))
+        os.write(clients[0].fd, b"\x1bi")
+        wait_for("idle navigation stays on the only waiting agent", lambda: any(p["client_id"] == tab_client
+                 and p["next_messages"] > before_messages and not p["next_pending"]
+                 and not p.get("next_check_pending", False) for p in ping(first))
+                 and client_panes(first).get(tab_client) == f'terminal_{screen_row["identity"]["pane_id"]}')
         # A non-agent anchor starts at the first pinned match. Starting at the
         # idle row would wrap into agents discovered in unrelated real sessions.
         non_agent_pane = next(p for p in json.loads(call(first, "action", "list-panes", "--json"))

@@ -62,9 +62,13 @@ impl NextFilter {
             && match self {
                 Self::All => true,
                 Self::PinnedOnly => pinned,
-                Self::IdleAndPinned => pinned && agent.status == Status::Idle,
+                Self::IdleAndPinned => {
+                    pinned && matches!(agent.status, Status::Idle | Status::Waiting)
+                }
                 Self::UnpinnedOnly => !pinned,
-                Self::IdleAndUnpinned => !pinned && agent.status == Status::Idle,
+                Self::IdleAndUnpinned => {
+                    !pinned && matches!(agent.status, Status::Idle | Status::Waiting)
+                }
                 Self::WorkingOnly => agent.status == Status::Working,
                 Self::NonIdle => agent.status != Status::Idle,
             }
@@ -79,8 +83,9 @@ pub struct NextRequest {
 }
 
 impl View {
-    /// Idle navigation walks matching candidates by most recent working -> idle
-    /// transition. Other filters keep display order, including the current anchor.
+    /// Idle navigation cycles waiting candidates first. Without waiting candidates,
+    /// walk by most recent transition to idle. Other filters keep display
+    /// order, including the current anchor.
     pub fn next_agent<'a>(
         &self,
         snapshot: &'a Snapshot,
@@ -93,8 +98,12 @@ impl View {
             NextFilter::IdleAndPinned | NextFilter::IdleAndUnpinned
         ) {
             rows.retain(|a| filter.matches(a, super::view::hierarchy_root(snapshot, a).pinned));
-            // Stable sorting preserves display order for ties and unknown history.
-            rows.sort_by_key(|a| std::cmp::Reverse(a.working_to_idle_at_ms));
+            if rows.iter().any(|a| a.status == Status::Waiting) {
+                rows.retain(|a| a.status == Status::Waiting);
+            } else {
+                // Stable sorting preserves display order for ties and unknown history.
+                rows.sort_by_key(|a| std::cmp::Reverse(a.status_since_ms));
+            }
         }
         let start = rows
             .iter()

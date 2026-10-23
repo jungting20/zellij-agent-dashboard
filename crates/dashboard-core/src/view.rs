@@ -888,7 +888,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_navigation_cycles_recent_transitions_with_stable_ties_and_unknowns_last() {
+    fn idle_navigation_cycles_recent_idle_transitions_with_stable_ties() {
         let mut snapshot = populated();
         snapshot.agents.truncate(6);
         let ids: Vec<_> = snapshot
@@ -898,13 +898,14 @@ mod tests {
             .collect();
         for agent in &mut snapshot.agents {
             agent.status = Status::Idle;
+            agent.status_since_ms = 0;
         }
         // Deliberately oppose pane/display order.
-        snapshot.agents[0].working_to_idle_at_ms = Some(2000);
-        snapshot.agents[1].working_to_idle_at_ms = Some(4000);
-        snapshot.agents[2].working_to_idle_at_ms = Some(3000);
-        snapshot.agents[3].working_to_idle_at_ms = Some(3000);
-        snapshot.agents[4].working_to_idle_at_ms = Some(9000);
+        snapshot.agents[0].status_since_ms = 2000;
+        snapshot.agents[1].status_since_ms = 4000;
+        snapshot.agents[2].status_since_ms = 3000;
+        snapshot.agents[3].status_since_ms = 3000;
+        snapshot.agents[4].status_since_ms = 9000;
         snapshot.agents[4].pinned = true;
         let view = View::default();
         let filter = crate::NextFilter::IdleAndUnpinned;
@@ -926,7 +927,7 @@ mod tests {
         snapshot.agents[0].status = Status::Working;
         assert_eq!(next(&snapshot, Some(&ids[0])), ids[1]);
         // A newly completed turn leads the next search from a working pane.
-        snapshot.agents[3].working_to_idle_at_ms = Some(5000);
+        snapshot.agents[3].status_since_ms = 5000;
         assert_eq!(next(&snapshot, Some(&ids[0])), ids[3]);
         snapshot.agents[3].pane.presence = crate::PanePresence::Missing;
         snapshot.agents[1].liveness = Liveness::Unverified;
@@ -947,6 +948,60 @@ mod tests {
                 .agent_id,
             ids[0]
         );
+    }
+
+    #[test]
+    fn idle_navigation_prioritizes_waiting_within_each_panel_and_restores_idle_order() {
+        use crate::NextFilter as F;
+        for (filter, pinned) in [(F::IdleAndPinned, true), (F::IdleAndUnpinned, false)] {
+            let mut snapshot = populated();
+            snapshot.agents.truncate(6);
+            for a in &mut snapshot.agents {
+                a.pinned = pinned;
+                a.status = Status::Idle;
+                a.status_since_ms = 0;
+            }
+            let ids: Vec<_> = snapshot
+                .agents
+                .iter()
+                .map(|a| a.identity.agent_id.clone())
+                .collect();
+            snapshot.agents[0].status_since_ms = 100;
+            snapshot.agents[1].status_since_ms = 200;
+            snapshot.agents[2].status = Status::Waiting;
+            snapshot.agents[3].status = Status::Waiting;
+            // Inherit the panel from the parent, even with a different own pin.
+            snapshot.agents[3].parent_id = Some(ids[2].clone());
+            snapshot.agents[3].pinned = !pinned;
+            snapshot.agents[4].status = Status::Waiting;
+            snapshot.agents[4].pinned = !pinned;
+            snapshot.agents[5].status = Status::Working;
+            let view = View::default();
+            let next = |snapshot: &Snapshot, current: Option<&str>| {
+                view.next_agent(snapshot, filter, current)
+                    .unwrap()
+                    .identity
+                    .agent_id
+                    .clone()
+            };
+            assert_eq!(next(&snapshot, None), ids[2]);
+            assert_eq!(next(&snapshot, Some("gone")), ids[2]);
+            assert_eq!(next(&snapshot, Some(&ids[0])), ids[2]);
+            assert_eq!(next(&snapshot, Some(&ids[2])), ids[3]);
+            assert_eq!(next(&snapshot, Some(&ids[3])), ids[2]);
+            snapshot.agents[2].liveness = Liveness::Unverified;
+            assert_eq!(next(&snapshot, Some(&ids[3])), ids[3]);
+            snapshot.agents[3].pane.presence = crate::PanePresence::Missing;
+            assert_eq!(next(&snapshot, None), ids[1]);
+            assert_eq!(next(&snapshot, Some(&ids[1])), ids[0]);
+            snapshot.agents[2].liveness = Liveness::Live;
+            snapshot.agents[2].ended = true;
+            assert_eq!(next(&snapshot, None), ids[1]);
+            snapshot.agents[2].ended = false;
+            snapshot.agents[2].status = Status::Idle;
+            snapshot.agents[2].status_since_ms = 300;
+            assert_eq!(next(&snapshot, Some(&ids[5])), ids[2]);
+        }
     }
 
     #[test]
@@ -1038,7 +1093,7 @@ mod tests {
     }
 
     #[test]
-    fn next_filters_use_live_panes_exact_idle_and_inherited_pin() {
+    fn next_filters_use_live_panes_and_inherited_pin() {
         let mut snapshot = populated();
         snapshot.agents.truncate(5);
         for a in &mut snapshot.agents {

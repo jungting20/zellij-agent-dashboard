@@ -16,13 +16,28 @@ use std::{
     time::Duration,
 };
 
-const TOOLS: &[(&str, &str)] = &[
-    ("codex", "codex"),
-    ("cursor", "agent"),
-    ("claude", "claude"),
-    ("gemini", "agy"),
-    ("hermes", "hermes"),
-    ("pi", "pi"),
+// Dashboard-created agents run with the user's requested full permissions.
+const TOOLS: &[(&str, &str, &[&str])] = &[
+    (
+        "codex",
+        "codex",
+        &["--dangerously-bypass-approvals-and-sandbox"],
+    ),
+    (
+        "cursor",
+        "agent",
+        &[
+            "--force",
+            "--sandbox",
+            "disabled",
+            "--approve-mcps",
+            "--trust",
+        ],
+    ),
+    ("claude", "claude", &["--dangerously-skip-permissions"]),
+    ("gemini", "agy", &["--dangerously-skip-permissions"]),
+    ("hermes", "hermes", &["--yolo"]),
+    ("pi", "pi", &["--approve"]),
 ];
 
 fn executable(name: &str) -> Result<PathBuf, String> {
@@ -68,8 +83,8 @@ pub fn catalog(deps: &HostDependencies) -> Result<Catalog, String> {
         directories,
         tools: TOOLS
             .iter()
-            .filter(|(_, exe)| executable(exe).is_ok())
-            .map(|(tool, _)| (*tool).into())
+            .filter(|(_, exe, _)| executable(exe).is_ok())
+            .map(|(tool, _, _)| (*tool).into())
             .collect(),
         sessions: inventory.epochs.into_iter().collect(),
     })
@@ -255,11 +270,10 @@ fn launch(
         parent,
     } = target;
     let path = cwd(directory)?;
-    let name = TOOLS
+    let (_, name, flags) = TOOLS
         .iter()
-        .find(|(name, _)| *name == tool)
-        .ok_or("지원하지 않는 에이전트 도구")?
-        .1;
+        .find(|(name, _, _)| *name == tool)
+        .ok_or("지원하지 않는 에이전트 도구")?;
     let exe = executable(name)?;
     let inventory = process::inventory(deps.runner)?;
     if inventory.epochs.get(session).map(String::as_str) != Some(epoch) {
@@ -304,6 +318,8 @@ fn launch(
         locked.commit()?;
     }
     let marker = format!("ZAD_LAUNCH_ID={}", request.request_id);
+    let mut args = vec![marker.into(), exe.into_os_string()];
+    args.extend(flags.iter().map(std::ffi::OsString::from));
     let pane = pane_number(&deps.terminal.new_pane(
         &SessionId(session.into()),
         &NewPane {
@@ -317,7 +333,7 @@ fn launch(
             floating: false,
             close_on_exit: false,
             program: "/usr/bin/env".into(),
-            args: vec![marker.into(), exe.into_os_string()],
+            args,
         },
     )?)?;
     let mut locked = deps.repository.begin_request(&request.request_id)?;

@@ -69,6 +69,32 @@ mod tests {
     }
 
     #[test]
+    fn session_updates_keep_current_session_and_renames_without_a_sync_query() {
+        use zellij_tile::prelude::SessionInfo;
+        for name in ["운영", "renamed session"] {
+            let sessions = vec![
+                SessionInfo {
+                    name: "other".into(),
+                    ..SessionInfo::default()
+                },
+                SessionInfo {
+                    name: name.into(),
+                    is_current_session: true,
+                    ..SessionInfo::default()
+                },
+            ];
+            let wire: ProtobufEvent = Event::SessionUpdate(sessions, vec![]).try_into().unwrap();
+            let Event::SessionUpdate(decoded, _) = decode_event(wire).unwrap() else {
+                panic!("wrong event")
+            };
+            assert_eq!(
+                decoded.iter().find(|s| s.is_current_session).unwrap().name,
+                name
+            );
+        }
+    }
+
+    #[test]
     fn invalid_scalars_are_rejected_instead_of_becoming_shortcuts() {
         for value in [-1, 0xd800, 0x110000] {
             let mut wire: ProtobufEvent = Event::Key(KeyWithModifier::new(BareKey::Char('a')))

@@ -12,6 +12,148 @@ pub struct ZellijCli<'a> {
 }
 
 impl<'a> ZellijCli<'a> {
+    pub fn update_notification(&self, session: &SessionId, payload: &str) -> Result<(), String> {
+        let mut spec = CommandSpec::new(
+            self.executable.clone(),
+            Some(Duration::from_millis(1200)),
+            0,
+        )
+        .args([
+            "--session",
+            &session.0,
+            "pipe",
+            "--name",
+            "agent-waiting-notification",
+            "--",
+            payload,
+        ]);
+        spec.capture = false;
+        command::output(self.runner, spec).map(|_| ())
+    }
+    pub fn sync_notification(
+        &self,
+        session: &SessionId,
+        wasm: &std::path::Path,
+        host: &std::path::Path,
+        state: &std::path::Path,
+        enabled: bool,
+    ) -> Result<(), String> {
+        for path in [wasm, host, state] {
+            if !path.is_absolute() || path.to_string_lossy().contains(',') {
+                return Err("notification paths must be absolute and cannot contain commas".into());
+            }
+        }
+        let url = format!("file:{}", wasm.display());
+        let configuration = format!(
+            "mode=notification,host_path={},state_dir={}",
+            host.display(),
+            state.display()
+        );
+        let bytes = self.action(
+            session,
+            vec!["list-panes".into(), "--all".into(), "--json".into()],
+            Duration::from_millis(1200),
+            1024 * 1024,
+        )?;
+        let panes: Vec<CliPane> = parse_panes(session, &bytes)?;
+        let mut tab_widths = std::collections::BTreeMap::new();
+        for pane in panes.iter().filter(|p| !p.is_floating && !p.is_suppressed) {
+            let width = tab_widths.entry(pane.tab_id).or_insert(0usize);
+            *width = (*width).max(pane.pane_x.saturating_add(pane.pane_columns));
+        }
+        let mut existing = std::collections::BTreeSet::new();
+        for pane in panes
+            .iter()
+            .filter(|p| p.is_plugin && p.plugin_url.as_deref() == Some(&url))
+        {
+            if !enabled || !pane.is_floating || pane.is_suppressed || !existing.insert(pane.tab_id)
+            {
+                self.action(
+                    session,
+                    vec![
+                        "close-pane".into(),
+                        "--pane-id".into(),
+                        format!("plugin_{}", pane.id).into(),
+                    ],
+                    Duration::from_millis(1200),
+                    128 * 1024,
+                )?;
+            } else {
+                // Coordinates are the left edge: x=100% would produce a zero-width pane.
+                let width = tab_widths.get(&pane.tab_id).copied().unwrap_or(40);
+                self.action(
+                    session,
+                    vec![
+                        "change-floating-pane-coordinates".into(),
+                        "--pane-id".into(),
+                        format!("plugin_{}", pane.id).into(),
+                        "--x".into(),
+                        width.saturating_sub(40).to_string().into(),
+                        "--y".into(),
+                        "0".into(),
+                        "--width".into(),
+                        width.min(40).to_string().into(),
+                        "--height".into(),
+                        "4".into(),
+                        "--borderless".into(),
+                        "true".into(),
+                        "--pinned".into(),
+                        "true".into(),
+                    ],
+                    Duration::from_millis(1200),
+                    128 * 1024,
+                )?;
+            }
+        }
+        if enabled {
+            if !wasm.is_file() {
+                return Err(format!("notification plugin not found: {}", wasm.display()));
+            }
+            let tabs: std::collections::BTreeSet<_> = panes
+                .iter()
+                .filter(|p| !p.is_plugin)
+                .filter_map(|p| p.tab_id)
+                .collect();
+            for tab in tabs {
+                if existing.contains(&Some(tab)) {
+                    continue;
+                }
+                let width = tab_widths.get(&Some(tab)).copied().unwrap_or(40);
+                self.action(
+                    session,
+                    vec![
+                        "new-pane".into(),
+                        "--plugin".into(),
+                        url.clone().into(),
+                        "--configuration".into(),
+                        configuration.clone().into(),
+                        "--tab-id".into(),
+                        tab.to_string().into(),
+                        "--floating".into(),
+                        "--no-focus".into(),
+                        "--name".into(),
+                        "Agent Waiting".into(),
+                        "--x".into(),
+                        width.saturating_sub(40).to_string().into(),
+                        "--y".into(),
+                        "0".into(),
+                        "--width".into(),
+                        width.min(40).to_string().into(),
+                        "--height".into(),
+                        "4".into(),
+                        "--borderless".into(),
+                        "true".into(),
+                        "--pinned".into(),
+                        "true".into(),
+                    ],
+                    Duration::from_secs(5),
+                    128 * 1024,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn open_dashboard(
         &self,
         session: &SessionId,
@@ -139,6 +281,10 @@ struct CliPane {
     is_floating: bool,
     #[serde(default)]
     is_suppressed: bool,
+    #[serde(default)]
+    pane_x: usize,
+    #[serde(default)]
+    pane_columns: usize,
     #[serde(default)]
     plugin_url: Option<String>,
     #[serde(default)]
@@ -293,6 +439,7 @@ mod tests {
     use super::*;
     use crate::command::{CommandError, CommandOutput};
     use std::cell::RefCell;
+    use std::path::Path;
 
     struct RecordingRunner {
         calls: RefCell<Vec<CommandSpec>>,
@@ -330,6 +477,81 @@ mod tests {
             .iter()
             .map(|s| s.to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn notification_anchors_with_positive_width_and_reuses_one_window_per_tab() {
+        let dir = tempfile::tempdir().unwrap();
+        let wasm = dir.path().join("notification.wasm");
+        std::fs::write(&wasm, []).unwrap();
+        let url = format!("file:{}", wasm.display());
+        let data = serde_json::json!([
+            {"id":0,"is_plugin":false,"tab_id":0,"pane_x":0,"pane_columns":120},
+            {"id":1,"is_plugin":true,"is_floating":true,"tab_id":0,"plugin_url":url,"pane_x":120,"pane_columns":0},
+            {"id":2,"is_plugin":true,"is_floating":true,"tab_id":0,"plugin_url":url},
+            {"id":3,"is_plugin":false,"tab_id":1,"pane_x":0,"pane_columns":20}
+        ]);
+        let runner = RecordingRunner::new(&serde_json::to_vec(&data).unwrap());
+        ZellijCli::new("zellij", &runner)
+            .sync_notification(
+                &SessionId("dev".into()),
+                &wasm,
+                Path::new("/app/dashboard-host"),
+                dir.path(),
+                true,
+            )
+            .unwrap();
+        let calls = runner.calls.borrow();
+        let args: Vec<Vec<String>> = calls
+            .iter()
+            .map(|c| {
+                c.args
+                    .iter()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .collect()
+            })
+            .collect();
+        let positioned = args
+            .iter()
+            .find(|a| a[3] == "change-floating-pane-coordinates")
+            .unwrap();
+        assert!(positioned.windows(2).any(|w| w == ["--x", "80"]));
+        assert!(positioned.windows(2).any(|w| w == ["--width", "40"]));
+        assert!(args
+            .iter()
+            .any(|a| a[3] == "close-pane" && a.last().unwrap() == "plugin_2"));
+        let created: Vec<_> = args.iter().filter(|a| a[3] == "new-pane").collect();
+        assert_eq!(created.len(), 1);
+        assert!(created[0].windows(2).any(|w| w == ["--x", "0"]));
+        assert!(created[0].windows(2).any(|w| w == ["--width", "20"]));
+        assert!(created[0].iter().any(|s| s == "--no-focus"));
+    }
+
+    #[test]
+    fn notification_cleanup_only_closes_its_own_plugin() {
+        let runner = RecordingRunner::new(br#"[
+            {"id":1,"is_plugin":true,"is_floating":true,"tab_id":0,"plugin_url":"file:/app/agent-notification.wasm"},
+            {"id":2,"is_plugin":true,"is_floating":true,"tab_id":0,"plugin_url":"file:/app/agent-notification.wasm"},
+            {"id":3,"is_plugin":true,"is_floating":true,"tab_id":0,"plugin_url":"file:/app/agent-dashboard.wasm"},
+            {"id":4,"is_plugin":false,"tab_id":0}
+        ]"#);
+        let host = ZellijCli::new("zellij", &runner);
+        // Cleanup must work even after the notification artifact was removed.
+        host.sync_notification(
+            &SessionId("운영".into()),
+            Path::new("/app/agent-notification.wasm"),
+            Path::new("/app/dashboard-host"),
+            Path::new("/state"),
+            false,
+        )
+        .unwrap();
+        let calls = runner.calls.borrow();
+        let targets: Vec<_> = calls
+            .iter()
+            .skip(1)
+            .map(|c| c.args.last().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(targets, ["plugin_1", "plugin_2"]);
     }
 
     #[test]

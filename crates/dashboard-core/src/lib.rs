@@ -4,6 +4,7 @@ pub mod menu;
 mod model;
 mod mutations;
 mod navigation;
+pub mod notification;
 mod signals;
 mod text;
 pub mod view;

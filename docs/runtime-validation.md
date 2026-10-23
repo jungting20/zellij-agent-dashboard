@@ -1,5 +1,53 @@
 # 실행 검증 기록
 
+## 2026-10-23 새 에이전트 전체 권한 실행
+
+`n`과 자식 worktree 생성의 공통 host 실행 경로에 도구별 승인 생략 옵션을 추가했다. Codex는 `--dangerously-bypass-approvals-and-sandbox`, Cursor는 `--force --sandbox disabled --approve-mcps --trust`, Claude·agy는 `--dangerously-skip-permissions`, Hermes는 `--yolo`, Pi는 프로젝트 파일 신뢰를 위한 `--approve`를 전달한다. 설치된 CLI의 `--help`로 옵션을 확인했다. Pi 확장 기능의 독자적인 승인은 우회하지 않는다. 기존 실행에는 소급 적용되지 않으며 저장 구조·스키마·복구 절차는 변경하지 않는다.
+
+Rust 포맷 검사, 코어 49개·호스트 68개 테스트와 native workspace Clippy를 통과했다(기존 수동 테스트 1개 제외). host와 `wasm32-wasip1` 플러그인을 release 빌드했다. 전체 `scripts/smoke.py`는 이번 변경의 생성 검사에 도달하기 전 `initial dashboard selection prefers current session`에서 시간 초과했다. 전체 smoke 통과로 간주하지 않는다. 별도 `.local/full-permission-runtime.py`는 실제 Zellij 0.45.0 임시 세션에서 모델 요청 없이 실행 파일 fixture를 사용해 6개 도구의 pane 내부 argv, terminal_command와 중복 요청의 pane 재사용을 확인했다. 결과는 `.local/full-permission-runtime.json`, 로그는 `.local/full-permission-runtime.log`이며 임시 세션을 종료했다. 같은 argv 검사를 정규 smoke에도 추가했다.
+
+검증 후 `bash scripts/build.sh`, `bash scripts/install.sh`로 설치했다. 사용자의 전체 세션 적용 요청 시 실행 중이었던 `hermes`는 다른 작업의 적용 진행 중 종료되어 복원하지 않았다. 최종 실행 목록의 유일한 운영 세션 `zellij-with-code-agent`에서 기존 collector ID 0·66을 reload하고 권한 승인·오류 없음·Connected·poll 및 revision 증가를 확인했다. 다른 작업이 교체한 collector를 포함한 기존 두 인스턴스는 유지했고 추가 생성하지 않았다. 열린 dashboard 모드 인스턴스는 없었으며, 새로 열 때 설치본을 사용한다. dist와 설치된 host·두 WASM의 SHA-256 일치를 확인했다. 결과는 `.local/apply-full-permission-all.json`, 최종 로그는 `.local/apply-full-permission-final.log`다.
+
+## 2026-10-23 waiting 우상단 알림창
+
+기존 collector가 전체 세션의 도달 가능한 live waiting 실행을 집계해 각 탭 우상단에 40열 × 4행의 테두리 없는 pinned floating plugin pane을 유지한다. 알림은 포커스를 가져가지 않으며, 최대 세 항목과 대기 개수를 표시한다. 대기가 많으면 마지막 행에 나머지 개수를 표시한다. 알림 plugin은 권한 요청·호스트 실행·상태 수집 없이 호스트가 전달한 요약만 표시한다. 상태 스키마는 4로 유지한다.
+
+`bash scripts/check.sh`에서 코어 49개·호스트 68개·플러그인 4개 테스트(총 121개), 포맷, native/WASI Clippy를 통과했다. 수동 성능 테스트 1개는 기존과 같이 제외했다. `bash scripts/build.sh`로 host와 두 WASM을 빌드했다.
+
+`python3 scripts/notification-smoke.py`로 실제 Zellij 0.45.0의 격리된 임시 세션 `notification-pefgdhlh`에서 다음을 통과했다. 테스트의 프로세스 목록은 이 임시 세션으로 제한해 다른 사용자 세션의 waiting 개수가 섞이지 않게 했다.
+
+- waiting 생성 시 대기 개수의 실제 터미널 출력, 120열 화면에서 x=80·y=0·40×4 크기, 기존 터미널 포커스 유지와 알림 비선택 상태
+- 두 클라이언트·8개 동시 helper 요청에서 중복 생성 없음
+- collector reload 뒤 기존 알림 pane 재사용, 새 탭에 하나씩 생성
+- 100열 화면으로 resize 후 오른쪽 끝 유지
+- waiting 해소 시 모든 알림 닫기, 다시 waiting이면 재생성, 실행 종료 시 닫기
+
+기술 검증 중 `x=100%`는 창 너비를 0으로 만들 수 있음을 확인했다. 타일 pane들의 실제 전체 너비에서 알림 너비를 뺀 셀 좌표를 사용하며, 작은 화면에서는 알림 너비를 화면 너비로 제한한다. 이 동작은 별도 호스트 회귀 테스트로 고정했다. 임시 세션은 종료했으며 결과는 `.local/notification-pefgdhlh/result.json`, `.local/notification-pefgdhlh/notice-pane.json`, `.local/notification-smoke.log`에 보존한다. 전체 기존 smoke 통과를 주장하지 않는다.
+
+기존 `zellij-with-code-agent` 서버에서 SDK `shim.rs:2037`의 동기 `get_session_list()` 응답 decode가 panic을 일으키고 이후 RefCell 접근이 연쇄 실패하는 것을 로그로 확인했다. 동기 조회 세 곳을 제거하고 `ModeUpdate`/`SessionUpdate`로 현재 세션을 받도록 수정했다. 세션 정보 도착 전 창 열기·이동은 보류한다. 이벤트의 현재 세션 표시·이름 변경 보존을 테스트했다. 수정 뒤 알림 검증 전체를 다시 통과했고, 임시 `window-xwomgq4f` 세션에서 실제 Alt q 열기·반복 열기·두 클라이언트 중복 방지·collector reload 뒤 재열기를 통과했다. 결과는 `.local/notification-window-check.log`다. 기술 검증용 세션은 모두 종료했다.
+
+검증 후 `bash scripts/build.sh`와 `bash scripts/install.sh`로 최종 host·대시보드 WASM·알림 WASM을 다시 빌드·설치했다. 최초 알림 버전은 `loop`, `study`, `asbplayer`, `운영`, `hermes`, `rea`에서 활성화와 polling 증가를 확인했다. 현재 `zellij-with-code-agent`에서는 panic 상태로 남은 기존 collector와 검증용 collector를 닫고 최종 collector 하나(ID 69)로 교체했으며, 권한 부여 후 `waiting_notifications=true`, `session_events=true`, 올바른 현재 세션 이름과 polling 증가를 확인했다. 기존 에이전트 pane은 종료하지 않았다. 현재 세션 확인 결과는 `.local/notification-current-verified.json`이다.
+
+최종 재적용 시 나머지 여섯 세션의 CLI 연결 소켓이 조회되지 않아 최종 수정본의 reload 재확인은 수행하지 못했다. 저장된 세션 기록과 일부 서버 프로세스는 남아 있으나 CLI는 해당 세션을 찾지 못한다. 이 제한을 전체 일곱 세션의 최종 재검증 성공으로 표현하지 않는다. 세션 재시작·복원과 에이전트 재실행은 수행하지 않았다. 앞선 적용 로그는 `.local/notification-apply.log`, `.local/notification-retry.log`, `.local/notification-debug-hermes.log`, 최종 시도 로그는 `.local/notification-apply-final.log`에 남겼다.
+
+## 2026-10-23 idle 순환의 모든 idle 전환 최신순 반영
+
+idle 후보 정렬을 `working_to_idle_at_ms`에서 `status_since_ms` 내림차순으로 변경했다. 기존 기준은 working→idle만 기록해 waiting→idle이나 found→idle이 최신이어도 앞에 오지 않는 문제가 있었다. 이제 수락한 모든 idle 전환을 반영하며 반복 idle·중복·역순 관측은 시각을 갱신하지 않는다. waiting 우선과 현재 후보 다음부터 순환하는 동작은 유지한다. 기존 저장 필드를 사용하므로 스키마 변경·별도 이관은 없다.
+
+`bash scripts/check.sh`에서 코어 48개·호스트 66개·플러그인 3개 테스트, 포맷과 native/WASI Clippy를 통과했다(수동 성능 테스트 1개 제외). `bash scripts/build.sh`로 release host/WASM을 빌드했다. `.local/idle-transition-runtime.py`로 실제 Zellij 0.45.0 임시 세션에서 waiting 우선, idle 복귀, 최근 waiting→idle이 오래된 working→idle보다 먼저 선택되는 실제 Alt i 이동과 다음 키에서 오래된 idle로의 순환을 확인했다. 최신 idle의 이전 working→idle 기록이 상대 후보보다 오래됐음을 함께 검사해 두 정렬 기준을 구분했다. 전체 smoke 통과를 주장하지 않으며, 앞 항목에 기록된 최초 선택 검사 문제를 피한 기능 검증이다. 임시 세션은 종료했다. 결과는 `.local/smoke-34cc7f7729/idle-transition-result.json`, 로그는 `.local/idle-transition-runtime.log`다.
+
+`bash scripts/install.sh` 후 현재 작업 세션 `loop`의 collector ID 0을 reload했다. 설치 host/WASM과 dist의 SHA-256 일치, permissions=true, error=null, polls 2→6와 revision 증가를 확인했다. 열린 대시보드는 없으며 다음 열기부터 적용된다. 임시 연결은 정리했다. 적용 결과는 `.local/apply-idle-transition-loop.json`이다.
+
+사용자의 전체 세션 적용 요청에 따라 실행 중인 `study`, `loop`, `asbplayer`, `운영`, `hermes`, `zellij-with-code-agent`, `rea` 7개 세션의 collector ID 0을 모두 reload했다. 각 세션에서 중복 collector 없이 기존 pane ID 유지, permissions=true, error=null, polls와 revision 증가를 확인했다. 열린 대시보드는 없으며 다음 열기부터 최신 동작을 사용한다. 종료된 임시 검증 세션은 복원하지 않았다. 검증용 임시 클라이언트는 정리했다. 설치본과 dist의 SHA-256 일치를 확인했으며 결과는 `.local/apply-idle-transition-all.json`, 로그는 `.local/apply-idle-transition-all.log`다.
+
+## 2026-10-23 idle 이동의 waiting 최우선 처리
+
+`idle-and-pinned`와 `idle-and-unpinned`는 해당 패널의 유효한 `waiting` 실행이 있으면 waiting만 순환한다. waiting이 없으면 기존 최근 working→idle 전환 순서로 idle을 순환한다. 부모 고정 상속과 종료·pane 부재·생존 미확인 실행 제외를 유지한다. 저장 구조 변경은 없다.
+
+`bash scripts/check.sh`에서 코어 48개·호스트 66개·플러그인 3개 테스트, 포맷과 native/WASI Clippy를 통과했다(기존 수동 성능 테스트 1개 제외). `bash scripts/build.sh`로 release host/WASM을 빌드했다. 전체 smoke는 기존 최초 선택 검사에서 시간 초과했다(`.local/idle-waiting-smoke.log`). 해당 검사 대신 dashboard 준비만 기다리는 별도 검증 스크립트 `.local/idle-waiting-runtime.py`로 실제 Zellij 0.45.0 임시 세션의 Alt i waiting 우선·단일 waiting 재선택·waiting 해제 후 idle 복귀를 통과했다. 전체 smoke 통과로 간주하지 않는다. 결과는 `.local/smoke-6ca3ecc4ef/idle-waiting-result.json`, 로그는 `.local/idle-waiting-runtime.log`이며 임시 세션은 종료했다.
+
+`bash scripts/install.sh`로 설치하고 현재 작업 세션 `loop`의 collector ID 0을 reload했다. 설치 host/WASM과 dist의 SHA-256 일치, permissions=true, error=null, polls 2→4와 revision 증가를 확인했다. 열린 대시보드는 없어 다음 열기부터 적용된다. 임시 연결 클라이언트는 정리했다. 결과는 `.local/apply-idle-waiting-loop.json`이다.
+
 ## 2026-10-16 대시보드 최초 선택
 
 첫 비어 있지 않은 목록에서 현재 Zellij 세션의 첫 에이전트를 선택한다. 현재 세션의 에이전트가 없으면 전체 표시 순서의 첫 항목을 선택하며, 고정 항목이면 고정 영역으로 초점도 이동한다. 이후 상태 갱신에서는 사용자의 선택을 유지한다. 권한 승인 후 세션 목록으로 현재 세션을 확인하며, 세션 이름이 없는 ModeUpdate로 이미 확인한 이름을 지우지 않는다. 저장 구조는 변경하지 않았다.
@@ -313,3 +361,6 @@ Zellij 0.45.0의 `zellij-utils::plugin_api::key::char_index_to_char`는 protobuf
 실제 Zellij 0.45.0 임시 세션 `zad-draft-14764529`에서 새 release WASM으로 `i` 입력과 예약, 한글·일본어·이모지 원문 보존, 한글 Backspace 후 재입력(`가나` → `가다`), 한국어 여러 줄 bracketed paste, 한글 검색을 확인했다. 예약 원문 세 개와 14개 확인 항목은 `.local/draft-highlight-beb018ef/result.json`에 기록했다. 재현 스크립트는 `.local/verify-korean-input.py`이며 임시 세션은 종료했다. macOS 입력기의 실제 조합 중 화면은 자동 검증 범위에 포함하지 않는다. 전체 smoke는 재실행하지 않았다.
 
 검증 후 `bash scripts/build.sh`와 `bash scripts/install.sh`로 host와 WASM을 빌드·설치했다. 이전 설치본은 `.local/unicode-input-backup-20261022-172516`에 보존했다. 현재 작업 대상 `loop`의 collector를 reload하고 기존 plugin ID 유지·중복 없음·permissions=true·error=null·Connected와 poll/revision 증가를 확인했다. 기존 열린 dashboard는 없었다. 설치된 동일 별칭으로 검증용 dashboard를 열어 실제 PTY 한글 검색 값 `한글`을 확인한 뒤 해당 검증 pane만 닫았다. 임시 클라이언트도 종료했다. dist와 설치 파일 SHA-256 일치 및 적용 기록은 `.local/apply-unicode-input-loop.json`에 있다. 다른 세션에는 reload하지 않았다.
+
+
+사용자의 전체 세션 적용 요청에 따라 실행 중인 `study`, `loop`, `asbplayer`, `운영`, `hermes`, `zellij-with-code-agent`, `rea` 7개 세션의 collector에 동일한 한글 입력 수정본을 reload했다. dist와 설치 host/WASM의 SHA-256 일치를 확인했고, 각 세션의 기존 plugin ID 0 유지·중복 없음·permissions=true·error=null·Connected와 reload 후 poll/revision 증가를 검증했다. 열린 dashboard는 없어 다음 열기부터 반영된다. 기존 클라이언트는 유지했고 검증용 임시 attach 클라이언트는 종료했다. 최종 실행 세션과 적용 범위, pane 및 클라이언트 재조회 결과는 `.local/apply-unicode-input-all.json`에 기록했다.

@@ -1046,6 +1046,7 @@ mod tests {
             .apply_signal(&screen("run", 5000, Some(Status::Idle), true))
             .unwrap();
         assert_eq!(store.agents["run"].working_to_idle_at_ms, None);
+        assert_eq!(store.agents["run"].status_since_ms, 5000);
         store
             .apply_signal(&screen("run", 6000, Some(Status::Working), false))
             .unwrap();
@@ -1075,7 +1076,26 @@ mod tests {
             .apply_signal(&screen("run", 11000, Some(Status::Idle), true))
             .unwrap();
         assert_eq!(recovered.agents["run"].working_to_idle_at_ms, Some(11000));
-        recovered.reconcile(&[found("new-run")], 12000);
+        // Idle navigation uses every transition to idle, including waiting -> idle.
+        recovered
+            .apply_signal(&screen("run", 12000, Some(Status::Waiting), false))
+            .unwrap();
+        recovered
+            .apply_signal(&screen("run", 13000, Some(Status::Idle), true))
+            .unwrap();
+        assert_eq!(recovered.agents["run"].status_since_ms, 13000);
+        assert_eq!(recovered.agents["run"].working_to_idle_at_ms, Some(11000));
+        for at in [13000, 12500, 14000] {
+            recovered
+                .apply_signal(&screen("run", at, Some(Status::Idle), true))
+                .unwrap();
+            assert_eq!(recovered.agents["run"].status_since_ms, 13000);
+        }
+        let recovered: Store =
+            serde_json::from_str(&serde_json::to_string(&recovered).unwrap()).unwrap();
+        assert_eq!(recovered.agents["run"].status_since_ms, 13000);
+        let mut recovered = recovered;
+        recovered.reconcile(&[found("new-run")], 15000);
         assert_eq!(recovered.agents["new-run"].working_to_idle_at_ms, None);
 
         let mut old = serde_json::to_value(&store.agents["run"]).unwrap();
