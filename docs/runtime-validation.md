@@ -6,7 +6,7 @@
 
 Rust 포맷, workspace 테스트 122개(기존 수동 테스트 1개 제외), native/WASI Clippy와 host·WASM release 빌드를 통과했다. 실제 Zellij 0.45.0 임시 세션 `nr-cnys0t5n`에서 permission_required를 주입해 waiting 상태 저장과 collector polling 지속, floating plugin 미생성, collector reload 후 waiting 유지와 알림 미생성을 확인했다. 임시 세션은 종료했으며 결과는 `.local/nr-cnys0t5n/result.json`에 남겼다.
 
-`bash scripts/build.sh`, `bash scripts/install.sh`를 실행하고 `zellij-with-code-agent` 세션에 적용했다. reload 후 이전 클라이언트 코드가 남아 collector를 교체했으며 최종 collector ID 11 하나, 권한 승인, Connected, polling 증가와 알림 필드 제거를 확인했다. 열린 dashboard 모드 pane은 없었고 미리보기 알림 pane은 닫았다. 설치본 host·WASM과 dist의 해시 일치, 설치된 알림 WASM 제거를 확인했다. 최종 응답은 `.local/notification-removal-applied.json`에 보존한다. 다른 사용자 세션은 reload하지 않았다.
+`bash scripts/build.sh`, `bash scripts/install.sh`를 실행하고 `zellij-with-code-agent` 세션에 적용했다. reload 후 이전 클라이언트 코드가 남아 collector를 교체했으며 최종 collector ID 11 하나, 권한 승인, Connected, polling 증가와 알림 필드 제거를 확인했다. 열린 dashboard 모드 pane은 없었고 미리보기 알림 pane은 닫았다. 설치본 host·WASM과 dist의 해시 일치, 설치된 알림 WASM 제거를 확인했다. 최종 응답은 `.local/notification-removal-applied.json`에 보존한다. 최초 적용은 현재 세션으로 제한했다. 이후 사용자의 전체 세션 적용 요청에 따라 실행 중인 `운영`, `study`, `hermes`, `zellij-with-code-agent` 네 세션을 모두 갱신·검증했다. 최종 collector ID는 각각 141, 6, 7, 11이며 세션당 하나만 유지한다. 각 세션에서 권한 승인, Connected, polling 증가, 알림 필드 제거와 알림 pane 부재를 확인했다. 열린 dashboard 모드 pane은 없었다. `rea`는 종료 상태라 복원하지 않았다. 전체 적용 결과는 `.local/notification-removal-all-sessions.json`에 보존한다.
 
 ## 2026-10-23 새 에이전트 전체 권한 실행
 
