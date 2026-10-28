@@ -13,6 +13,5 @@ chmod 755 dist/.dashboard-host.new
 mv -f dist/.dashboard-host.new dist/dashboard-host
 cp target/wasm32-wasip1/release/dashboard-plugin.wasm dist/.agent-dashboard.wasm.new
 mv -f dist/.agent-dashboard.wasm.new dist/agent-dashboard.wasm
-cp dist/agent-dashboard.wasm dist/.agent-notification.wasm.new
-mv -f dist/.agent-notification.wasm.new dist/agent-notification.wasm
+rm -f dist/agent-notification.wasm
 printf 'Built %s/dist\n' "$dashboard_root"

@@ -12,148 +12,6 @@ pub struct ZellijCli<'a> {
 }
 
 impl<'a> ZellijCli<'a> {
-    pub fn update_notification(&self, session: &SessionId, payload: &str) -> Result<(), String> {
-        let mut spec = CommandSpec::new(
-            self.executable.clone(),
-            Some(Duration::from_millis(1200)),
-            0,
-        )
-        .args([
-            "--session",
-            &session.0,
-            "pipe",
-            "--name",
-            "agent-waiting-notification",
-            "--",
-            payload,
-        ]);
-        spec.capture = false;
-        command::output(self.runner, spec).map(|_| ())
-    }
-    pub fn sync_notification(
-        &self,
-        session: &SessionId,
-        wasm: &std::path::Path,
-        host: &std::path::Path,
-        state: &std::path::Path,
-        enabled: bool,
-    ) -> Result<(), String> {
-        for path in [wasm, host, state] {
-            if !path.is_absolute() || path.to_string_lossy().contains(',') {
-                return Err("notification paths must be absolute and cannot contain commas".into());
-            }
-        }
-        let url = format!("file:{}", wasm.display());
-        let configuration = format!(
-            "mode=notification,host_path={},state_dir={}",
-            host.display(),
-            state.display()
-        );
-        let bytes = self.action(
-            session,
-            vec!["list-panes".into(), "--all".into(), "--json".into()],
-            Duration::from_millis(1200),
-            1024 * 1024,
-        )?;
-        let panes: Vec<CliPane> = parse_panes(session, &bytes)?;
-        let mut tab_widths = std::collections::BTreeMap::new();
-        for pane in panes.iter().filter(|p| !p.is_floating && !p.is_suppressed) {
-            let width = tab_widths.entry(pane.tab_id).or_insert(0usize);
-            *width = (*width).max(pane.pane_x.saturating_add(pane.pane_columns));
-        }
-        let mut existing = std::collections::BTreeSet::new();
-        for pane in panes
-            .iter()
-            .filter(|p| p.is_plugin && p.plugin_url.as_deref() == Some(&url))
-        {
-            if !enabled || !pane.is_floating || pane.is_suppressed || !existing.insert(pane.tab_id)
-            {
-                self.action(
-                    session,
-                    vec![
-                        "close-pane".into(),
-                        "--pane-id".into(),
-                        format!("plugin_{}", pane.id).into(),
-                    ],
-                    Duration::from_millis(1200),
-                    128 * 1024,
-                )?;
-            } else {
-                // Coordinates are the left edge: x=100% would produce a zero-width pane.
-                let width = tab_widths.get(&pane.tab_id).copied().unwrap_or(40);
-                self.action(
-                    session,
-                    vec![
-                        "change-floating-pane-coordinates".into(),
-                        "--pane-id".into(),
-                        format!("plugin_{}", pane.id).into(),
-                        "--x".into(),
-                        width.saturating_sub(40).to_string().into(),
-                        "--y".into(),
-                        "0".into(),
-                        "--width".into(),
-                        width.min(40).to_string().into(),
-                        "--height".into(),
-                        "4".into(),
-                        "--borderless".into(),
-                        "true".into(),
-                        "--pinned".into(),
-                        "true".into(),
-                    ],
-                    Duration::from_millis(1200),
-                    128 * 1024,
-                )?;
-            }
-        }
-        if enabled {
-            if !wasm.is_file() {
-                return Err(format!("notification plugin not found: {}", wasm.display()));
-            }
-            let tabs: std::collections::BTreeSet<_> = panes
-                .iter()
-                .filter(|p| !p.is_plugin)
-                .filter_map(|p| p.tab_id)
-                .collect();
-            for tab in tabs {
-                if existing.contains(&Some(tab)) {
-                    continue;
-                }
-                let width = tab_widths.get(&Some(tab)).copied().unwrap_or(40);
-                self.action(
-                    session,
-                    vec![
-                        "new-pane".into(),
-                        "--plugin".into(),
-                        url.clone().into(),
-                        "--configuration".into(),
-                        configuration.clone().into(),
-                        "--tab-id".into(),
-                        tab.to_string().into(),
-                        "--floating".into(),
-                        "--no-focus".into(),
-                        "--name".into(),
-                        "Agent Waiting".into(),
-                        "--x".into(),
-                        width.saturating_sub(40).to_string().into(),
-                        "--y".into(),
-                        "0".into(),
-                        "--width".into(),
-                        width.min(40).to_string().into(),
-                        "--height".into(),
-                        "4".into(),
-                        "--borderless".into(),
-                        "true".into(),
-                        "--pinned".into(),
-                        "true".into(),
-                    ],
-                    Duration::from_secs(5),
-                    128 * 1024,
-                )?;
-            }
-        }
-        Ok(())
-    }
-
     pub fn open_dashboard(
         &self,
         session: &SessionId,
@@ -255,6 +113,40 @@ impl<'a> ZellijCli<'a> {
         )
     }
 
+    fn wait_project_tab(
+        &self,
+        session: &SessionId,
+        cwd: &std::path::Path,
+        expected_tab: Option<u32>,
+    ) -> Result<u32, String> {
+        // Creation returns before pane cwd metadata is always available.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let panes = self.list_panes(session, true, Duration::from_millis(1200))?;
+            let tabs: std::collections::BTreeSet<_> = panes
+                .iter()
+                .filter(|pane| {
+                    pane.tab_name == session.0
+                        && expected_tab.is_none_or(|tab| pane.tab_id == Some(tab))
+                        && pane
+                            .cwd
+                            .as_deref()
+                            .and_then(|p| std::fs::canonicalize(p).ok())
+                            .as_deref()
+                            == Some(cwd)
+                })
+                .filter_map(|pane| pane.tab_id)
+                .collect();
+            match tabs.into_iter().collect::<Vec<_>>().as_slice() {
+                [tab] => return Ok(*tab),
+                [] if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                _ => return Err("생성한 프로젝트 탭을 확인할 수 없습니다".into()),
+            }
+        }
+    }
+
     fn pane_action(
         &self,
         session: &SessionId,
@@ -282,10 +174,6 @@ struct CliPane {
     #[serde(default)]
     is_suppressed: bool,
     #[serde(default)]
-    pane_x: usize,
-    #[serde(default)]
-    pane_columns: usize,
-    #[serde(default)]
     plugin_url: Option<String>,
     #[serde(default)]
     tab_id: Option<u32>,
@@ -312,6 +200,31 @@ fn parse_panes(session: &SessionId, bytes: &[u8]) -> Result<Vec<CliPane>, String
 }
 
 impl TerminalHost for ZellijCli<'_> {
+    fn active_sessions(&self) -> Result<Option<std::collections::BTreeSet<String>>, String> {
+        let bytes = command::output(
+            self.runner,
+            CommandSpec::new(
+                self.executable.clone(),
+                Some(Duration::from_secs(5)),
+                128 * 1024,
+            )
+            .args(["list-sessions", "--no-formatting"]),
+        )?;
+        let mut sessions = std::collections::BTreeSet::new();
+        for line in String::from_utf8_lossy(&bytes)
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+        {
+            let (name, metadata) = line
+                .rsplit_once(" [Created ")
+                .ok_or("Zellij returned an invalid session list")?;
+            if !metadata.contains("(EXITED - attach to resurrect)") {
+                sessions.insert(name.to_owned());
+            }
+        }
+        Ok(Some(sessions))
+    }
+
     fn list_panes(
         &self,
         session: &SessionId,
@@ -418,6 +331,101 @@ impl TerminalHost for ZellijCli<'_> {
         let number = id.parse::<u32>().map_err(|_| "invalid created pane ID")?;
         Ok(pane_id(number))
     }
+    fn create_project_tab(
+        &self,
+        session: &SessionId,
+        cwd: &std::path::Path,
+        new_session: bool,
+    ) -> Result<u32, String> {
+        if !new_session {
+            let clients = self.action(
+                session,
+                vec!["list-clients".into()],
+                Duration::from_secs(2),
+                128 * 1024,
+            )?;
+            if String::from_utf8_lossy(&clients).lines().count() <= 1 {
+                // Zellij 0.45 drops new-tab requests without an attached client.
+                // Attach a finite, owned PTY client only for tab creation.
+                let script = r#"stty rows 32 cols 120
+"$1" attach "$2" < /dev/tty & client=$!
+trap 'kill -TERM "$client" 2>/dev/null; wait "$client" 2>/dev/null' EXIT
+attempt=0
+while ! "$1" --session "$2" action list-clients | awk 'NR>1 { found=1 } END { exit !found }'; do
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt 40 ] || exit 1
+    sleep .05
+done
+"$1" --session "$2" action new-tab --name "$2" --cwd "$3" --no-focus
+sleep .2
+"#;
+                let mut spec = CommandSpec::new("/usr/bin/script", Some(Duration::from_secs(8)), 0)
+                    .args([
+                        OsString::from("-q"),
+                        "/dev/null".into(),
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        script.into(),
+                        "zad-project-tab".into(),
+                        self.executable.clone(),
+                        session.0.clone().into(),
+                        cwd.as_os_str().to_owned(),
+                    ]);
+                spec.capture = false;
+                spec.hold_stdin = true;
+                spec.env = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"]
+                    .into_iter()
+                    .map(|key| (key.into(), None))
+                    .collect();
+                spec.env
+                    .push(("TERM".into(), Some("xterm-256color".into())));
+                command::output(self.runner, spec)?;
+                return self.wait_project_tab(session, cwd, None);
+            }
+            let bytes = self.action(
+                session,
+                vec![
+                    "new-tab".into(),
+                    "--name".into(),
+                    session.0.clone().into(),
+                    "--cwd".into(),
+                    cwd.as_os_str().to_owned(),
+                    "--no-focus".into(),
+                ],
+                Duration::from_secs(5),
+                128 * 1024,
+            )?;
+            let tab = String::from_utf8_lossy(&bytes)
+                .trim()
+                .parse::<u32>()
+                .map_err(|_| "Zellij did not return a tab ID".to_owned())?;
+            return self.wait_project_tab(session, cwd, Some(tab));
+        }
+        // Explicit layout prevents user default commands from being launched.
+        // JSON string quoting also escapes KDL string delimiters and controls.
+        let name = serde_json::to_string(&session.0).map_err(|e| e.to_string())?;
+        let directory = serde_json::to_string(&cwd.to_string_lossy()).map_err(|e| e.to_string())?;
+        let layout = format!("layout {{\n tab name={name} cwd={directory} {{\n  pane\n }}\n}}\n");
+        let mut spec = CommandSpec::new(
+            self.executable.clone(),
+            Some(Duration::from_secs(10)),
+            128 * 1024,
+        )
+        .args([
+            "--layout-string",
+            &layout,
+            "attach",
+            "--create-background",
+            &session.0,
+        ]);
+        spec.cwd = Some(cwd.to_owned());
+        spec.env = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"]
+            .into_iter()
+            .map(|key| (key.into(), None))
+            .collect();
+        command::output(self.runner, spec)?;
+        self.wait_project_tab(session, cwd, None)
+    }
     fn notify_changed(&self, session: &SessionId, event_id: &str) -> Result<(), String> {
         let mut spec =
             CommandSpec::new(self.executable.clone(), Some(Duration::from_millis(500)), 0).args([
@@ -439,23 +447,32 @@ mod tests {
     use super::*;
     use crate::command::{CommandError, CommandOutput};
     use std::cell::RefCell;
-    use std::path::Path;
 
     struct RecordingRunner {
         calls: RefCell<Vec<CommandSpec>>,
         response: RefCell<Result<Vec<u8>, CommandError>>,
+        responses: RefCell<std::collections::VecDeque<Vec<u8>>>,
     }
     impl RecordingRunner {
         fn new(bytes: &[u8]) -> Self {
             Self {
                 calls: RefCell::new(vec![]),
                 response: RefCell::new(Ok(bytes.to_vec())),
+                responses: RefCell::new(Default::default()),
             }
         }
     }
     impl CommandRunner for RecordingRunner {
         fn run(&self, spec: &CommandSpec) -> Result<CommandOutput, CommandError> {
             self.calls.borrow_mut().push(spec.clone());
+            if let Some(bytes) = self.responses.borrow_mut().pop_front() {
+                return Ok(CommandOutput {
+                    success: true,
+                    code: Some(0),
+                    stdout: bytes,
+                    stderr: vec![],
+                });
+            }
             match &*self.response.borrow() {
                 Ok(bytes) => Ok(CommandOutput {
                     success: true,
@@ -480,78 +497,72 @@ mod tests {
     }
 
     #[test]
-    fn notification_anchors_with_positive_width_and_reuses_one_window_per_tab() {
-        let dir = tempfile::tempdir().unwrap();
-        let wasm = dir.path().join("notification.wasm");
-        std::fs::write(&wasm, []).unwrap();
-        let url = format!("file:{}", wasm.display());
-        let data = serde_json::json!([
-            {"id":0,"is_plugin":false,"tab_id":0,"pane_x":0,"pane_columns":120},
-            {"id":1,"is_plugin":true,"is_floating":true,"tab_id":0,"plugin_url":url,"pane_x":120,"pane_columns":0},
-            {"id":2,"is_plugin":true,"is_floating":true,"tab_id":0,"plugin_url":url},
-            {"id":3,"is_plugin":false,"tab_id":1,"pane_x":0,"pane_columns":20}
-        ]);
-        let runner = RecordingRunner::new(&serde_json::to_vec(&data).unwrap());
-        ZellijCli::new("zellij", &runner)
-            .sync_notification(
-                &SessionId("dev".into()),
-                &wasm,
-                Path::new("/app/dashboard-host"),
-                dir.path(),
-                true,
-            )
-            .unwrap();
-        let calls = runner.calls.borrow();
-        let args: Vec<Vec<String>> = calls
-            .iter()
-            .map(|c| {
-                c.args
-                    .iter()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .collect()
-            })
-            .collect();
-        let positioned = args
-            .iter()
-            .find(|a| a[3] == "change-floating-pane-coordinates")
-            .unwrap();
-        assert!(positioned.windows(2).any(|w| w == ["--x", "80"]));
-        assert!(positioned.windows(2).any(|w| w == ["--width", "40"]));
-        assert!(args
-            .iter()
-            .any(|a| a[3] == "close-pane" && a.last().unwrap() == "plugin_2"));
-        let created: Vec<_> = args.iter().filter(|a| a[3] == "new-pane").collect();
-        assert_eq!(created.len(), 1);
-        assert!(created[0].windows(2).any(|w| w == ["--x", "0"]));
-        assert!(created[0].windows(2).any(|w| w == ["--width", "20"]));
-        assert!(created[0].iter().any(|s| s == "--no-focus"));
+    fn active_session_list_excludes_exited_processes_and_preserves_names() {
+        let runner = RecordingRunner::new("한글 세션 [Created 2h ago] (current)\nold [Created 1h ago] (EXITED - attach to resurrect)\n".as_bytes());
+        let host = ZellijCli::new("zellij", &runner);
+        assert_eq!(
+            host.active_sessions().unwrap().unwrap(),
+            ["한글 세션".into()].into_iter().collect()
+        );
+        *runner.response.borrow_mut() = Ok(b"unexpected response".to_vec());
+        assert!(host.active_sessions().is_err());
     }
 
     #[test]
-    fn notification_cleanup_only_closes_its_own_plugin() {
-        let runner = RecordingRunner::new(br#"[
-            {"id":1,"is_plugin":true,"is_floating":true,"tab_id":0,"plugin_url":"file:/app/agent-notification.wasm"},
-            {"id":2,"is_plugin":true,"is_floating":true,"tab_id":0,"plugin_url":"file:/app/agent-notification.wasm"},
-            {"id":3,"is_plugin":true,"is_floating":true,"tab_id":0,"plugin_url":"file:/app/agent-dashboard.wasm"},
-            {"id":4,"is_plugin":false,"tab_id":0}
-        ]"#);
-        let host = ZellijCli::new("zellij", &runner);
-        // Cleanup must work even after the notification artifact was removed.
-        host.sync_notification(
-            &SessionId("운영".into()),
-            Path::new("/app/agent-notification.wasm"),
-            Path::new("/app/dashboard-host"),
-            Path::new("/state"),
-            false,
-        )
+    fn project_tab_creation_preserves_names_paths_and_clears_caller_environment() {
+        let directory = tempfile::tempdir().unwrap();
+        let cwd = std::fs::canonicalize(directory.path()).unwrap();
+        let session = SessionId("한글 \"프로젝트\"".into());
+        let response = serde_json::to_vec(&serde_json::json!([
+            {"id": 0, "is_plugin": false, "tab_id": 7,
+             "tab_name": session.0, "pane_cwd": cwd}
+        ]))
         .unwrap();
+        let runner = RecordingRunner::new(&response);
+        let host = ZellijCli::new("zellij", &runner);
+        assert_eq!(host.create_project_tab(&session, &cwd, true).unwrap(), 7);
         let calls = runner.calls.borrow();
-        let targets: Vec<_> = calls
+        let spec = &calls[0];
+        assert_eq!(
+            spec.args[2..],
+            ["attach", "--create-background", &session.0].map(OsString::from)
+        );
+        assert!(spec.args[1]
+            .to_string_lossy()
+            .contains("name=\"한글 \\\"프로젝트\\\"\""));
+        assert_eq!(spec.cwd.as_deref(), Some(cwd.as_path()));
+        for key in ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"] {
+            assert!(spec.env.contains(&(key.into(), None)));
+        }
+        drop(calls);
+        runner.responses.borrow_mut().extend([
+            b"CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n1 terminal_0 N/A\n".to_vec(),
+            b"7\n".to_vec(),
+            b"[]".to_vec(),
+        ]);
+        let before = runner.calls.borrow().len();
+        assert_eq!(host.create_project_tab(&session, &cwd, false).unwrap(), 7);
+        let args: Vec<String> = runner.calls.borrow()[before + 1]
+            .args
             .iter()
-            .skip(1)
-            .map(|c| c.args.last().unwrap().to_str().unwrap())
+            .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
-        assert_eq!(targets, ["plugin_1", "plugin_2"]);
+        assert!(args.windows(2).any(|w| w == ["--name", &session.0]));
+        assert!(args.iter().any(|arg| arg == "--no-focus"));
+        runner
+            .responses
+            .borrow_mut()
+            .push_back(b"CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n".to_vec());
+        let before = runner.calls.borrow().len();
+        assert_eq!(host.create_project_tab(&session, &cwd, false).unwrap(), 7);
+        let calls = runner.calls.borrow();
+        let helper = &calls[before + 1];
+        assert_eq!(helper.program, "/usr/bin/script");
+        assert!(helper.hold_stdin && !helper.capture);
+        assert!(helper.env.contains(&("ZELLIJ_SESSION_NAME".into(), None)));
+        drop(calls);
+        *runner.response.borrow_mut() = Ok(b"invalid".to_vec());
+        assert!(host.create_project_tab(&session, &cwd, false).is_err());
     }
 
     #[test]

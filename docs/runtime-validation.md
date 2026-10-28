@@ -1,5 +1,13 @@
 # 실행 검증 기록
 
+## 2026-10-28 waiting floating pane 알림 제거
+
+사용자 요청으로 알림 전용 코어·호스트 모듈, collector의 알림 동기화, notification 플러그인 모드와 전용 smoke 스크립트를 제거했다. 빌드·설치에서는 대시보드 WASM과 host만 배포하고 이전 알림 WASM을 정리한다. waiting 상태 감지와 대시보드 표시는 유지하며 저장 구조와 스키마는 변경하지 않는다. 아래 2026-10-23 알림 기록은 제거 전 이력이다.
+
+Rust 포맷, workspace 테스트 122개(기존 수동 테스트 1개 제외), native/WASI Clippy와 host·WASM release 빌드를 통과했다. 실제 Zellij 0.45.0 임시 세션 `nr-cnys0t5n`에서 permission_required를 주입해 waiting 상태 저장과 collector polling 지속, floating plugin 미생성, collector reload 후 waiting 유지와 알림 미생성을 확인했다. 임시 세션은 종료했으며 결과는 `.local/nr-cnys0t5n/result.json`에 남겼다.
+
+`bash scripts/build.sh`, `bash scripts/install.sh`를 실행하고 `zellij-with-code-agent` 세션에 적용했다. reload 후 이전 클라이언트 코드가 남아 collector를 교체했으며 최종 collector ID 11 하나, 권한 승인, Connected, polling 증가와 알림 필드 제거를 확인했다. 열린 dashboard 모드 pane은 없었고 미리보기 알림 pane은 닫았다. 설치본 host·WASM과 dist의 해시 일치, 설치된 알림 WASM 제거를 확인했다. 최종 응답은 `.local/notification-removal-applied.json`에 보존한다. 다른 사용자 세션은 reload하지 않았다.
+
 ## 2026-10-23 새 에이전트 전체 권한 실행
 
 `n`과 자식 worktree 생성의 공통 host 실행 경로에 도구별 승인 생략 옵션을 추가했다. Codex는 `--dangerously-bypass-approvals-and-sandbox`, Cursor는 `--force --sandbox disabled --approve-mcps --trust`, Claude·agy는 `--dangerously-skip-permissions`, Hermes는 `--yolo`, Pi는 프로젝트 파일 신뢰를 위한 `--approve`를 전달한다. 설치된 CLI의 `--help`로 옵션을 확인했다. Pi 확장 기능의 독자적인 승인은 우회하지 않는다. 기존 실행에는 소급 적용되지 않으며 저장 구조·스키마·복구 절차는 변경하지 않는다.
@@ -8,7 +16,7 @@ Rust 포맷 검사, 코어 49개·호스트 68개 테스트와 native workspace 
 
 검증 후 `bash scripts/build.sh`, `bash scripts/install.sh`로 설치했다. 사용자의 전체 세션 적용 요청 시 실행 중이었던 `hermes`는 다른 작업의 적용 진행 중 종료되어 복원하지 않았다. 최종 실행 목록의 유일한 운영 세션 `zellij-with-code-agent`에서 기존 collector ID 0·66을 reload하고 권한 승인·오류 없음·Connected·poll 및 revision 증가를 확인했다. 다른 작업이 교체한 collector를 포함한 기존 두 인스턴스는 유지했고 추가 생성하지 않았다. 열린 dashboard 모드 인스턴스는 없었으며, 새로 열 때 설치본을 사용한다. dist와 설치된 host·두 WASM의 SHA-256 일치를 확인했다. 결과는 `.local/apply-full-permission-all.json`, 최종 로그는 `.local/apply-full-permission-final.log`다.
 
-## 2026-10-23 waiting 우상단 알림창
+## 2026-10-23 waiting 우상단 알림창 (2026-10-28 제거)
 
 기존 collector가 전체 세션의 도달 가능한 live waiting 실행을 집계해 각 탭 우상단에 40열 × 4행의 테두리 없는 pinned floating plugin pane을 유지한다. 알림은 포커스를 가져가지 않으며, 최대 세 항목과 대기 개수를 표시한다. 대기가 많으면 마지막 행에 나머지 개수를 표시한다. 알림 plugin은 권한 요청·호스트 실행·상태 수집 없이 호스트가 전달한 요약만 표시한다. 상태 스키마는 4로 유지한다.
 
@@ -379,3 +387,15 @@ Zellij 0.45.0의 `zellij-utils::plugin_api::key::char_index_to_char`는 protobuf
 `bash scripts/install.sh`로 설치하고 이 저장소의 실행 대상 `zellij-with-code-agent` 세션 collector를 reload했다. 기존 plugin ID 69 유지, 권한 승인·오류 없음·Connected·poll 1→2를 확인했다. 적용 당시 열린 대시보드는 없었으며, 설치 별칭으로 검증용 대시보드를 열어 j/k 이동·마지막 미리보기와 7초 대기 후 SCROLL 없음을 확인하고 해당 pane만 닫았다. 검증용 attach 클라이언트는 종료했고 다른 세션은 reload하지 않았다. 설치 파일과 dist의 host/대시보드/알림 WASM 해시는 일치한다. 적용 결과는 `.local/apply-scroll-navigation.json`, 이전 설치본은 `.local/scroll-navigation-backup-20261023-171607`에 보존했다.
 
 사용자의 전체 세션 적용 요청에 따라 실행 중인 `zellij-with-code-agent`, `study`, `운영` 3개 세션에 동일 수정본을 reload했다. 적용 도중 새로 시작된 `study`와 재시작된 `운영`도 새 실행 상태에서 다시 적용했다. 각 세션에서 기존 collector ID 유지·권한 승인·오류 없음·Connected·poll 증가, 설치 별칭 대시보드의 마지막 선택 미리보기와 대기 후 SCROLL 없음을 확인했다. 최초 목록의 열린 대시보드는 적용 시점에 이미 닫혀 있었으며 검증용 pane만 생성·종료했다. 기존 클라이언트는 유지하고 검증용 attach만 종료했다. 마지막 실행 세션 목록과 적용 목록 일치·collector 중복 없음·설치 해시 일치를 확인했다. 종료된 세션은 복원하지 않았으며 이후 실행에서는 설치본을 사용한다. 통합 결과는 `.local/apply-scroll-all.json`이다.
+
+## 2026-10-28 `n` 프로젝트 세션·탭 자동 생성
+
+선택한 경로를 정규화해 기존 terminal pane의 cwd와 비교한다. 기존 탭이 없으면 폴더 이름의 세션과 탭을 생성하고, 같은 이름의 실행 중 세션이 있으면 그 세션에 프로젝트 탭을 추가한다. 기존 탭 우선순위·모호한 목적지 거부·요청 ID 중복 억제·실행 직전 세대/cwd 재검증은 유지한다. 프로세스 스캔에 종료된 서버가 남을 수 있어 CLI의 실행 중 세션 목록과 교차 확인하고 EXITED 세션은 탐색에서 제외한다. 상태/DB/요청 스키마 변경은 없다.
+
+Zellij 0.45.0에서 background attach 직후에는 초기 pane의 cwd 메타데이터가 아직 없을 수 있어 최대 5초 동안 준비를 확인한다. 연결된 클라이언트가 없는 기존 세션은 `new-tab`이 ID만 반환하고 pane을 만들지 않는 것을 실제 확인했다. 이 경우 호스트 어댑터에서 macOS `script`로 소유한 임시 PTY 클라이언트를 연결하고, 연결 확인 후 탭을 만든 뒤 해당 클라이언트만 종료한다. 입력 pipe는 클라이언트 처리 중 EOF가 발생하지 않도록 열어 두며, 준비 확인과 helper 실행 모두 시간 제한이 있다. 상주 helper나 수집기는 추가하지 않는다.
+
+`bash scripts/check.sh`에서 포맷·workspace 테스트(코어 48, 호스트 68, 플러그인 6 통과, 수동 성능 테스트 1개 제외)·host/WASM Clippy를 확인했다. 실제 Zellij 임시 세션에서 Codex 실행 파일을 sleep fixture로 대체해 새 세션/탭/agent 생성·심볼릭 링크 정규화·동일 요청 재사용·기존 탭 재사용·클라이언트가 없는 동명 세션에 다른 경로 탭 추가·모호한 탭 거부를 검증했다. 실제 대시보드에 `n` → 절대 경로 → 도구 선택을 입력해 새 프로젝트 세션에서 agent pane 생성도 확인했다. 종료된 `rea`가 목록에 있는 상태에서 탐색이 성공했다. 결과는 `.local/project-launch-e0e449a6/result.json`, 재현 스크립트는 `.local/verify-project-launch.py`, 최종 자동 검사 기록은 `.local/project-launch-final-check.log`에 있다. 실제 AI 제공자 대화는 실행하지 않았다. 검증용 세션은 종료했다.
+
+초기 검증에서 EXITED 세션의 잔존 프로세스, 비동기 초기 pane 준비와 무클라이언트 탭 생성 문제를 발견해 보완했다. 모호성 검증용 탭도 연결 클라이언트 없이 생성하면 만들어지지 않아, 검증 설정에 임시 attach와 pane 생성 확인을 추가한 뒤 최종 검증을 통과했다.
+
+최종 검증 후 `bash scripts/build.sh`와 `bash scripts/install.sh`로 host/WASM을 빌드·설치했다. 사용자가 선택한 전체 실행 세션 `운영`, `study`, `hermes`, `zellij-with-code-agent` 4개의 collector를 reload하고 기존 ID 0 유지·중복 없음·권한 승인·오류 없음·Connected·poll 증가를 확인했다. 열린 대시보드는 없었으며 다음 열기부터 설치본을 사용한다. 종료된 `rea`는 복원하지 않았다. 검증용 attach 클라이언트만 종료했고 설치본과 dist의 host/WASM SHA-256 일치를 확인했다. 적용 기록은 `.local/apply-project-launch.json`, 이전 설치본은 `.local/project-launch-backup-20261028-093145`에 보존했다.

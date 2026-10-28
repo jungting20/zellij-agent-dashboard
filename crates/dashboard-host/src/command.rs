@@ -21,6 +21,7 @@ pub struct CommandSpec {
     pub timeout: Option<Duration>,
     pub limit: usize,
     pub capture: bool,
+    pub hold_stdin: bool,
 }
 
 impl CommandSpec {
@@ -33,6 +34,7 @@ impl CommandSpec {
             timeout,
             limit,
             capture: true,
+            hold_stdin: false,
         }
     }
 
@@ -127,7 +129,11 @@ impl CommandRunner for SystemCommandRunner {
         let mut command = Command::new(&spec.program);
         command
             .args(&spec.args)
-            .stdin(Stdio::null())
+            .stdin(if spec.hold_stdin {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .process_group(0);
         if let Some(cwd) = &spec.cwd {
             command.current_dir(cwd);

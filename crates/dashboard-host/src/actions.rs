@@ -192,7 +192,7 @@ fn git(directory: &Path, args: &[&str], deps: &HostDependencies) -> Result<Strin
 fn choose_launch_tab(
     matches: std::collections::BTreeSet<(String, u32)>,
     preferred_session: &str,
-) -> Result<(String, u32), String> {
+) -> Result<Option<(String, u32)>, String> {
     let preferred: Vec<_> = matches
         .iter()
         .filter(|(s, _)| s == preferred_session)
@@ -204,8 +204,8 @@ fn choose_launch_tab(
         preferred
     };
     match candidates.as_slice() {
-        [target] => Ok(target.clone()),
-        [] => Err("선택한 경로가 열려 있는 Zellij 세션·탭을 찾을 수 없습니다".into()),
+        [target] => Ok(Some(target.clone())),
+        [] => Ok(None),
         _ => Err("선택한 경로가 여러 Zellij 탭에 열려 있어 실행 대상을 결정할 수 없습니다".into()),
     }
 }
@@ -215,7 +215,7 @@ fn find_launch_tab<'a>(
     preferred_session: &'a str,
     path: &Path,
     terminal: &dyn crate::terminal::TerminalHost,
-) -> Result<(String, u32), String> {
+) -> Result<Option<(String, u32)>, String> {
     let mut matches = std::collections::BTreeSet::new();
     // A match in the requesting session takes precedence, so unrelated
     // sessions must not prevent a launch there.
@@ -434,17 +434,51 @@ fn execute(
             tool,
         } => {
             let path = self::cwd(cwd)?;
-            let inventory = process::inventory(deps.runner)?;
+            let mut inventory = process::inventory(deps.runner)?;
+            if let Some(active) = deps.terminal.active_sessions()? {
+                inventory.epochs.retain(|name, _| active.contains(name));
+            }
             if inventory.epochs.get(session) != Some(epoch) {
                 return Err("Zellij session changed or exited".into());
             }
-            let (destination, tab) = find_launch_tab(
+            // Validate the tool before creating any Zellij resources.
+            let (_, executable_name, _) = TOOLS
+                .iter()
+                .find(|(name, _, _)| name == tool)
+                .ok_or("지원하지 않는 에이전트 도구")?;
+            executable(executable_name)?;
+            let existing = find_launch_tab(
                 inventory.epochs.keys().map(String::as_str),
                 session,
                 &path,
                 deps.terminal,
             )?;
-            let destination_epoch = &inventory.epochs[&destination];
+            let (destination, tab) = match existing {
+                Some(target) => target,
+                None => {
+                    let project = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .filter(|name| !name.is_empty())
+                        .ok_or("프로젝트 이름을 확인할 수 없습니다")?;
+                    let tab = deps.terminal.create_project_tab(
+                        &SessionId(project.into()),
+                        &path,
+                        !inventory.epochs.contains_key(project),
+                    )?;
+                    (project.into(), tab)
+                }
+            };
+            let destination_inventory = process::inventory(deps.runner)?;
+            let destination_epoch = destination_inventory
+                .epochs
+                .get(&destination)
+                .ok_or("생성한 Zellij 세션을 확인할 수 없습니다")?;
+            if let Some(previous) = inventory.epochs.get(&destination) {
+                if previous != destination_epoch {
+                    return Err("Zellij session changed or exited".into());
+                }
+            }
             launch(
                 request,
                 LaunchTarget {
@@ -874,12 +908,12 @@ mod tests {
                 session: "dev".into(),
                 epoch: target.session_epoch,
                 cwd: "/tmp".into(),
-                tool: "codex".into(),
+                tool: "unsupported-tool".into(),
             },
         };
         let result = action(dir.path(), request.clone(), &deps).unwrap();
         assert_eq!(result.state, RequestState::Failed);
-        assert!(result.message.contains("찾을 수 없습니다"));
+        assert!(result.message.contains("지원하지 않는"));
         let duplicate = action(dir.path(), request, &deps).unwrap();
         assert_eq!(duplicate.state, result.state);
         assert_eq!(duplicate.message, result.message);
@@ -893,7 +927,7 @@ mod tests {
         let path = fs::canonicalize("/tmp").unwrap();
         assert_eq!(
             find_launch_tab(["broken", "dev"].into_iter(), "dev", &path, &host).unwrap(),
-            ("dev".into(), 3)
+            Some(("dev".into(), 3))
         );
         assert_eq!(*host.calls.borrow(), ["dev"]);
 
@@ -913,13 +947,13 @@ mod tests {
             .collect();
         assert_eq!(
             choose_launch_tab(matches, "dev").unwrap(),
-            ("dev".into(), 3)
+            Some(("dev".into(), 3))
         );
         assert_eq!(
             choose_launch_tab([("other".into(), 7)].into_iter().collect(), "dev").unwrap(),
-            ("other".into(), 7)
+            Some(("other".into(), 7))
         );
-        assert!(choose_launch_tab(Default::default(), "dev").is_err());
+        assert_eq!(choose_launch_tab(Default::default(), "dev").unwrap(), None);
         assert!(choose_launch_tab(
             [("dev".into(), 3), ("dev".into(), 4)].into_iter().collect(),
             "dev"

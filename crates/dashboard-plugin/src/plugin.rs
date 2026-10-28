@@ -14,9 +14,6 @@ pub struct Dashboard {
     editor_request: Option<String>,
     edited_pending: bool,
     collector: bool,
-    notification: bool,
-    notification_pending: bool,
-    notification_content: dashboard_core::notification::Notification,
     host_path: String,
     state_dir: String,
     permissions: bool,
@@ -207,7 +204,7 @@ fi"#,
     }
 
     fn refresh_output(&mut self) {
-        if self.collector || self.notification || !self.permissions {
+        if self.collector || !self.permissions {
             return;
         }
         let agent = self.snapshot.as_ref().and_then(|s| {
@@ -396,12 +393,6 @@ impl ZellijPlugin for Dashboard {
             .unwrap_or_default()
             .as_nanos();
         self.collector = configuration.get("mode").map(String::as_str) == Some("collector");
-        self.notification = configuration.get("mode").map(String::as_str) == Some("notification");
-        if self.notification {
-            // A passive display needs no host commands, state access or permission dialog.
-            set_selectable(false);
-            return;
-        }
         self.host_path = configuration
             .get("host_path")
             .cloned()
@@ -416,9 +407,9 @@ impl ZellijPlugin for Dashboard {
         }
         if !matches!(
             configuration.get("mode").map(String::as_str),
-            Some("collector" | "dashboard" | "notification")
+            Some("collector" | "dashboard")
         ) {
-            self.config_error = Some("mode must be collector, dashboard or notification".into());
+            self.config_error = Some("mode must be collector or dashboard".into());
         }
         self.message = "Waiting for permissions".into();
         subscribe(&[
@@ -513,8 +504,8 @@ impl ZellijPlugin for Dashboard {
                 self.navigation_clients(clients);
                 return false;
             }
-            Event::Key(key) if !self.collector && !self.notification => self.key(key),
-            Event::PastedText(text) if !self.collector && !self.notification => {
+            Event::Key(key) if !self.collector => self.key(key),
+            Event::PastedText(text) if !self.collector => {
                 if let Some(menu) = self.view.menu.as_mut() {
                     if menu.editing() && !menu.busy {
                         menu.input.insert(&text, menu.kind == MenuKind::Input);
@@ -524,9 +515,6 @@ impl ZellijPlugin for Dashboard {
             }
             Event::RunCommandResult(code, stdout, stderr, context) => {
                 let kind = context.get("kind").map(String::as_str).unwrap_or("");
-                if kind == "sync-notification" {
-                    self.notification_pending = false;
-                }
                 if kind == "open-dashboard" {
                     self.window_pending = false;
                 }
@@ -607,17 +595,6 @@ impl ZellijPlugin for Dashboard {
                             }
                             .into();
                             self.snapshot = Some(snapshot);
-                            if self.collector
-                                && !self.notification_pending
-                                && !self.view.source_session.is_empty()
-                            {
-                                self.notification_pending = true;
-                                self.host(
-                                    "sync-notification",
-                                    Some(&self.view.source_session),
-                                    "sync-notification",
-                                );
-                            }
                             self.refresh_queue_menu();
                             if self.preview_due.is_none() {
                                 self.refresh_output();
@@ -681,19 +658,6 @@ impl ZellijPlugin for Dashboard {
     }
 
     fn pipe(&mut self, message: PipeMessage) -> bool {
-        if self.notification {
-            if message.name == "agent-waiting-notification" {
-                if let Some(content) = message
-                    .payload
-                    .as_deref()
-                    .and_then(|s| serde_json::from_str(s).ok())
-                {
-                    self.notification_content = content;
-                    return true;
-                }
-            }
-            return false;
-        }
         match message.name.as_str() {
             "agent-dashboard-open" if self.collector && message.is_private => {
                 if !self.window_pending {
@@ -727,8 +691,7 @@ impl ZellijPlugin for Dashboard {
                 }
                 if let PipeSource::Cli(pipe_id) = &message.source {
                     let response = serde_json::json!({
-                        "mode": if self.collector { "collector" } else if self.notification { "notification" } else { "dashboard" },
-                        "waiting_notifications": self.collector,
+                        "mode": if self.collector { "collector" } else { "dashboard" },
                         "session_events": true,
                         "plugin_id": self.plugin_id,
                         "client_id": self.client_id,
@@ -770,8 +733,6 @@ impl ZellijPlugin for Dashboard {
                 error,
                 cols.saturating_sub(1),
             )]
-        } else if self.notification {
-            self.notification_content.render(rows, cols)
         } else if let Some(snapshot) = self.snapshot.as_ref() {
             self.view.render(snapshot, rows, cols, &self.message)
         } else {

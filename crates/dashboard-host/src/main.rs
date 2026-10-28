@@ -5,7 +5,6 @@ mod hooks;
 mod host;
 mod instruction_queue;
 mod legacy_json;
-mod notification;
 mod panes;
 mod process;
 mod repository;
@@ -86,13 +85,6 @@ fn run(
     };
     let command = args.first().map(String::as_str).unwrap_or("help");
     match command {
-        "sync-notification" => notification::sync(
-            args.get(1)
-                .ok_or("sync-notification requires a session name")?,
-            &dir,
-            deps.repository,
-            &zellij::ZellijCli::new("zellij", runner),
-        ),
         "open-dashboard" => {
             let session = args
                 .get(1)

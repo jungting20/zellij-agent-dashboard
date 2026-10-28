@@ -4,12 +4,6 @@ Zellij 서버가 백그라운드 수집기를 실행한다. 화면 pane과 수�
 
 ## 실행 경로
 
-### Waiting 알림
-
-collector는 snapshot 조회 성공 후 현재 세션을 지정해 유한한 `dashboard-host sync-notification SESSION`을 호출한다. 이 명령은 상태 디렉터리의 세션별 `notification-window-*.lock`을 잠근 뒤 최신 스냅샷을 읽고, 도달 가능한 live waiting 실행이 있으면 각 탭에 알림 plugin pane을 하나 유지한다. 대기가 없어지면 해당 URL의 알림만 닫고 중복 창도 정리한다. 저장소 트랜잭션을 잡은 채 Zellij를 호출하지 않는다. 종료·실패 시 OS가 파일 잠금을 해제하므로 다음 collector tick에 복구한다.
-
-`agent-notification.wasm`은 같은 WASI 바이너리의 `mode=notification`이다. collector가 호스트를 통해 보내는 제한된 요약(개수와 최대 세 항목)만 수신·표시하며 직접 저장소 조회, 호스트 명령, 권한 요청, 타이머 수집을 실행하지 않는다. 대시보드와 URL을 분리해 기존 대시보드 열기/닫기 경로와 혼동하지 않는다. 상태 DB 스키마는 4로 유지하며 추가 도메인 상태를 저장하지 않는다. 알림 복구는 다음 tick에 현재 pane과 snapshot을 재조회하는 방식이다.
-
 현재 세션 이름은 `ModeUpdate`와 `SessionUpdate` 이벤트에서 갱신한다. 세션 이름을 알기 전에는 창 열기와 순환 이동 요청을 보류한다. SDK의 동기 `get_session_list()`는 일부 기존 서버에서 응답 decode 중 panic을 일으켜 사용하지 않는다. WASM에서 panic 후 RefCell 대여가 남아 후속 이벤트가 연쇄 실패하는 경로를 피한다.
 
 ### 기존 수집 경로

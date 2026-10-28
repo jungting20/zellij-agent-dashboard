@@ -28,6 +28,10 @@ pub struct NewPane {
 }
 
 pub trait TerminalHost {
+    /// Optional live-session inventory, excluding exited sessions awaiting resurrection.
+    fn active_sessions(&self) -> Result<Option<std::collections::BTreeSet<String>>, String> {
+        Ok(None)
+    }
     fn list_panes(
         &self,
         session: &SessionId,
@@ -43,5 +47,14 @@ pub trait TerminalHost {
     fn write_bytes(&self, session: &SessionId, pane: &PaneId, bytes: &[u8]) -> Result<(), String>;
     fn close_pane(&self, session: &SessionId, pane: &PaneId) -> Result<(), String>;
     fn new_pane(&self, session: &SessionId, options: &NewPane) -> Result<PaneId, String>;
+    /// Create a project tab, starting a detached session if requested.
+    fn create_project_tab(
+        &self,
+        _session: &SessionId,
+        _cwd: &std::path::Path,
+        _new_session: bool,
+    ) -> Result<u32, String> {
+        Err("project tab creation is unsupported by this terminal backend".into())
+    }
     fn notify_changed(&self, session: &SessionId, event_id: &str) -> Result<(), String>;
 }
