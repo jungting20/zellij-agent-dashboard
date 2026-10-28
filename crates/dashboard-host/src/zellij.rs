@@ -126,8 +126,7 @@ impl<'a> ZellijCli<'a> {
             let tabs: std::collections::BTreeSet<_> = panes
                 .iter()
                 .filter(|pane| {
-                    pane.tab_name == session.0
-                        && expected_tab.is_none_or(|tab| pane.tab_id == Some(tab))
+                    expected_tab.is_none_or(|tab| pane.tab_id == Some(tab))
                         && pane
                             .cwd
                             .as_deref()
@@ -401,30 +400,32 @@ sleep .2
                 .map_err(|_| "Zellij did not return a tab ID".to_owned())?;
             return self.wait_project_tab(session, cwd, Some(tab));
         }
-        // Explicit layout prevents user default commands from being launched.
-        // JSON string quoting also escapes KDL string delimiters and controls.
-        let name = serde_json::to_string(&session.0).map_err(|e| e.to_string())?;
-        let directory = serde_json::to_string(&cwd.to_string_lossy()).map_err(|e| e.to_string())?;
-        let layout = format!("layout {{\n tab name={name} cwd={directory} {{\n  pane\n }}\n}}\n");
+        // Let Zellij resolve the user's configured default layout and swap layout.
         let mut spec = CommandSpec::new(
             self.executable.clone(),
             Some(Duration::from_secs(10)),
             128 * 1024,
         )
-        .args([
-            "--layout-string",
-            &layout,
-            "attach",
-            "--create-background",
-            &session.0,
-        ]);
+        .args(["attach", "--create-background", &session.0]);
         spec.cwd = Some(cwd.to_owned());
         spec.env = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"]
             .into_iter()
             .map(|key| (key.into(), None))
             .collect();
         command::output(self.runner, spec)?;
-        self.wait_project_tab(session, cwd, None)
+        let tab = self.wait_project_tab(session, cwd, None)?;
+        self.action(
+            session,
+            vec![
+                "rename-tab".into(),
+                session.0.clone().into(),
+                "--tab-id".into(),
+                tab.to_string().into(),
+            ],
+            Duration::from_millis(1200),
+            128 * 1024,
+        )?;
+        Ok(tab)
     }
     fn notify_changed(&self, session: &SessionId, event_id: &str) -> Result<(), String> {
         let mut spec =
@@ -515,7 +516,7 @@ mod tests {
         let session = SessionId("한글 \"프로젝트\"".into());
         let response = serde_json::to_vec(&serde_json::json!([
             {"id": 0, "is_plugin": false, "tab_id": 7,
-             "tab_name": session.0, "pane_cwd": cwd}
+             "tab_name": "default tab", "pane_cwd": cwd}
         ]))
         .unwrap();
         let runner = RecordingRunner::new(&response);
@@ -524,12 +525,28 @@ mod tests {
         let calls = runner.calls.borrow();
         let spec = &calls[0];
         assert_eq!(
-            spec.args[2..],
+            spec.args,
             ["attach", "--create-background", &session.0].map(OsString::from)
         );
-        assert!(spec.args[1]
-            .to_string_lossy()
-            .contains("name=\"한글 \\\"프로젝트\\\"\""));
+        let rename: Vec<_> = calls
+            .last()
+            .unwrap()
+            .args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            rename,
+            [
+                "--session",
+                &session.0,
+                "action",
+                "rename-tab",
+                &session.0,
+                "--tab-id",
+                "7"
+            ]
+        );
         assert_eq!(spec.cwd.as_deref(), Some(cwd.as_path()));
         for key in ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"] {
             assert!(spec.env.contains(&(key.into(), None)));

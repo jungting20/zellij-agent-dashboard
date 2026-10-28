@@ -399,3 +399,13 @@ Zellij 0.45.0에서 background attach 직후에는 초기 pane의 cwd 메타데�
 초기 검증에서 EXITED 세션의 잔존 프로세스, 비동기 초기 pane 준비와 무클라이언트 탭 생성 문제를 발견해 보완했다. 모호성 검증용 탭도 연결 클라이언트 없이 생성하면 만들어지지 않아, 검증 설정에 임시 attach와 pane 생성 확인을 추가한 뒤 최종 검증을 통과했다.
 
 최종 검증 후 `bash scripts/build.sh`와 `bash scripts/install.sh`로 host/WASM을 빌드·설치했다. 사용자가 선택한 전체 실행 세션 `운영`, `study`, `hermes`, `zellij-with-code-agent` 4개의 collector를 reload하고 기존 ID 0 유지·중복 없음·권한 승인·오류 없음·Connected·poll 증가를 확인했다. 열린 대시보드는 없었으며 다음 열기부터 설치본을 사용한다. 종료된 `rea`는 복원하지 않았다. 검증용 attach 클라이언트만 종료했고 설치본과 dist의 host/WASM SHA-256 일치를 확인했다. 적용 기록은 `.local/apply-project-launch.json`, 이전 설치본은 `.local/project-launch-backup-20261028-093145`에 보존했다.
+
+## 2026-10-28 새 프로젝트의 사용자 기본 레이아웃 적용
+
+`n`의 새 세션 생성에서 최소 레이아웃을 직접 전달하던 `--layout-string`을 제거했다. 프로젝트 경로에서 `attach --create-background`를 실행해 Zellij가 사용자 설정의 기본 레이아웃과 연관 swap 레이아웃을 읽게 하고, 준비된 terminal pane의 cwd로 탭 ID를 확인한 뒤 `rename-tab --tab-id`로 프로젝트 이름을 붙인다. 기존 세션의 탭 생성과 agent pane 추가 방식은 유지한다. 상태/DB 스키마 변경은 없다.
+
+확인한 사용자 `~/.config/zellij/layouts/default.kdl`은 셸 pane과 하단 1줄 `zellij:compact-bar`이며, `default.swap.kdl`에는 `h2v`와 `float-2`가 있다. 사용자 원본 설정은 수정하지 않았다. 이 두 파일을 임시 config에 복사한 실제 Zellij 검증에서 compact-bar 존재, dump-layout의 두 swap 규칙, 프로젝트 세션/탭 이름과 cwd, agent 실행, 요청 중복 억제, 기존 탭 재사용, 무클라이언트 동명 세션의 탭 추가, 모호성 거부, 실제 대시보드 `n` 메뉴 실행을 확인했다. Codex는 sleep fixture로 대체했다. 결과는 `.local/default-layout-6f562f01/result.json`, 재현 스크립트는 `.local/verify-default-layout.py`다. 임시 세션은 종료했다.
+
+`bash scripts/check.sh`의 포맷·workspace 테스트(48+68+6 통과, 수동 성능 1개 제외)·host/WASM Clippy와 release host/WASM 빌드가 통과했다. 기본 탭 이름이 프로젝트 이름과 달라도 cwd로 찾고 정확한 tab ID를 rename하는 회귀 검사를 포함한다.
+
+검증 후 `bash scripts/build.sh`와 `bash scripts/install.sh`를 실행하고, 당시 실행 중인 `운영`, `study`, `hermes`, `zellij-with-code-agent`, `loop-graph` 5개 세션의 collector를 reload했다. 각 세션에서 기존 collector ID 유지·중복 없음·권한 승인·오류 없음·Connected·poll 증가를 확인했다. 열린 대시보드는 없었으며 다음 열기부터 설치본을 사용한다. 검증용 attach만 종료했고, 설치본/dist host·WASM SHA-256 일치를 확인했다. 종료된 `rea`는 제외했다. 적용 기록은 `.local/apply-default-layout.json`이다.
