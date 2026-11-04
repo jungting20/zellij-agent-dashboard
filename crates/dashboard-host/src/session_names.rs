@@ -2,24 +2,24 @@
 use crate::process::Process;
 use std::{collections::BTreeMap, path::Path};
 
-pub fn current_sessions(processes: &[Process]) -> BTreeMap<u32, String> {
-    let mut directories = std::collections::BTreeSet::new();
-    let mut servers = std::collections::BTreeSet::new();
-    for process in processes {
-        let mut args = process.command.split_whitespace();
-        let executable = args.next().unwrap_or("");
-        if Path::new(executable).file_name().and_then(|s| s.to_str()) != Some("zellij")
-            || args.next() != Some("--server")
-        {
-            continue;
-        }
-        servers.insert(process.pid);
-        // Only the directory is needed; session names may contain spaces.
-        if let Some(directory) = args.next().and_then(|socket| Path::new(socket).parent()) {
-            directories.insert(directory.to_owned());
-        }
-    }
-    let mut names = BTreeMap::new();
+#[derive(Default)]
+pub struct SessionResolution {
+    pub names: BTreeMap<u32, String>,
+    pub displaced: std::collections::BTreeSet<u32>,
+}
+
+pub fn current_sessions(processes: &[Process]) -> SessionResolution {
+    let sockets: BTreeMap<_, _> = processes
+        .iter()
+        .filter_map(|process| {
+            crate::process::server_socket(process).map(|socket| (process.pid, socket))
+        })
+        .collect();
+    let directories: std::collections::BTreeSet<_> = sockets
+        .values()
+        .filter_map(|socket| socket.parent().map(Path::to_owned))
+        .collect();
+    let mut resolution = SessionResolution::default();
     for directory in directories {
         let Ok(entries) = std::fs::read_dir(directory) else {
             continue;
@@ -32,14 +32,24 @@ pub fn current_sessions(processes: &[Process]) -> BTreeMap<u32, String> {
             let Some(pid) = peer_pid(&entry.path()) else {
                 continue;
             };
-            if servers.contains(&pid) {
+            if sockets.contains_key(&pid) {
                 if let Some(name) = entry.file_name().to_str() {
-                    names.insert(pid, name.to_owned());
+                    resolution.names.insert(pid, name.to_owned());
                 }
             }
         }
     }
-    names
+    for (pid, socket) in &sockets {
+        if resolution.names.contains_key(pid) {
+            continue;
+        }
+        if let Some(peer) = peer_pid(socket) {
+            if peer != *pid && resolution.names.contains_key(&peer) {
+                resolution.displaced.insert(*pid);
+            }
+        }
+    }
+    resolution
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -88,6 +98,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn excludes_server_whose_socket_is_owned_by_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("same session");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let pid = std::process::id();
+        let processes: Vec<_> = [u32::MAX, pid]
+            .into_iter()
+            .map(|pid| Process {
+                pid,
+                ppid: 1,
+                started: "now".into(),
+                command: format!("zellij --server {}", socket.display()),
+            })
+            .collect();
+        let resolution = current_sessions(&processes);
+        assert_eq!(resolution.names.get(&pid).unwrap(), "same session");
+        assert_eq!(resolution.displaced, [u32::MAX].into());
+        drop(listener);
+    }
+
+    #[test]
     fn resolves_renamed_socket_to_its_server_process() {
         let directory = tempfile::tempdir().unwrap();
         let original = directory.path().join("old");
@@ -101,7 +132,10 @@ mod tests {
             started: "now".into(),
             command: format!("zellij --server {}", original.display()),
         }];
-        assert_eq!(current_sessions(&processes).get(&pid).unwrap(), "새 세션");
+        assert_eq!(
+            current_sessions(&processes).names.get(&pid).unwrap(),
+            "새 세션"
+        );
         drop(listener);
     }
 }

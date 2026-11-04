@@ -1,5 +1,17 @@
 # 실행 검증 기록
 
+## 2026-11-04 교체된 세션 소켓의 이전 서버 제외
+
+`architecture-study-web`에서 `easyDesk` 에이전트 종료 요청이 `list-panes --json` 파싱 오류로 실패했다. 이전 서버 PID 30178과 자식 에이전트는 남아 있었지만, 대소문자를 구분하지 않는 파일시스템에서 해당 소켓은 새 `easydesk` 서버 PID 67242에 연결됐다. Zellij 0.45.0은 이전 세션 조회에 종료 코드 0과 일반 세션 목록을 반환했다. 설치본에도 Launch의 종료 세션 필터는 포함돼 있었으며, 이번 요청은 Close이므로 그 필터를 거치지 않았다.
+
+호스트는 현재 소켓의 peer PID로 이름을 확인한다. 현재 이름이 없는 이전 서버의 원래 소켓이 다른 확인된 서버에 연결되면 이전 서버와 그 자식 에이전트를 발견 목록에서 제외한다. 확인 실패만으로 제외하지 않으며, 이름 변경 후에도 자신의 소켓이 확인된 서버는 유지한다. 조작 요청은 pane 조회 전에 전체 실행 identity가 현재 발견 목록에 있는지 검사한다. 이전 실행을 새 세션으로 재지정하지 않는다. 저장 스키마와 기본값은 변경하지 않았다.
+
+`bash scripts/check.sh`에서 코어 48개, 호스트 71개, 플러그인 6개 테스트와 포맷·native/WASI Clippy·스크립트 구문 검사를 통과했다. 기존 수동 성능 테스트 1개는 제외했다. 소켓 교체, 같은 이름을 쓰는 새 서버로 이전 자식이 연결되지 않는 것, 오래된 요청에서 pane 조회가 발생하지 않는 것을 회귀 테스트로 확인했다. 독립 코드 검토도 통과했다.
+
+실제 Zellij 임시 세션에서 이전 서버의 소켓을 제거하고 이름의 대소문자만 다른 새 세션을 생성했다. 수집 간격 1800ms 이후 각각 조회해 이전 설치본에서는 이전 에이전트가 live 1개로 남고 수정본에서는 0개가 되는 것을 확인했다. 이전 실행의 Close 요청은 JSON 파싱 오류 대신 `agent process changed or exited; refresh the list`로 거부됐다. 결과와 재현 스크립트는 `.local/orphan-session/result.json`, `.local/orphan-session/verify.py`다. 검증용 서버와 클라이언트는 정리했다.
+
+`bash scripts/build.sh`, `bash scripts/install.sh`를 실행하고 오류 요청의 출처인 `architecture-study-web`의 collector ID 0만 reload했다. 기존 ID와 collector 하나를 유지했고 권한 승인·Connected·error=null·poll 2→3 증가를 확인했다. 열린 dashboard는 없었다. 설치 host/WASM과 dist의 SHA-256 일치를 확인했으며 적용 기록은 `.local/orphan-session/applied.json`이다. 설치 후 공용 스냅샷에서 이전 `easyDesk` 실행이 사라진 것도 확인했다. 기존 실패 요청은 재전송하지 않았다.
+
 ## 2026-10-28 waiting floating pane 알림 제거
 
 사용자 요청으로 알림 전용 코어·호스트 모듈, collector의 알림 동기화, notification 플러그인 모드와 전용 smoke 스크립트를 제거했다. 빌드·설치에서는 대시보드 WASM과 host만 배포하고 이전 알림 WASM을 정리한다. waiting 상태 감지와 대시보드 표시는 유지하며 저장 구조와 스키마는 변경하지 않는다. 아래 2026-10-23 알림 기록은 제거 전 이력이다.

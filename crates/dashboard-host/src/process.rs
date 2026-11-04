@@ -113,13 +113,43 @@ fn tool(command: &str) -> Option<&'static str> {
     }
 }
 
+pub(crate) fn server_socket(process: &Process) -> Option<std::path::PathBuf> {
+    let mut args = process.command.split_whitespace();
+    let executable = args.next().unwrap_or("");
+    if Path::new(executable).file_name().and_then(|s| s.to_str()) != Some("zellij")
+        || args.next() != Some("--server")
+    {
+        return None;
+    }
+    // Server socket names can contain spaces. Environment values follow argv.
+    let socket_and_env = args.collect::<Vec<_>>().join(" ");
+    let socket = socket_and_env
+        .split(" ZELLIJ=")
+        .next()
+        .unwrap_or(&socket_and_env);
+    let socket = socket.split(" PATH=").next().unwrap_or(socket);
+    let socket_end = socket
+        .char_indices()
+        .find_map(|(i, c)| {
+            if c != ' ' {
+                return None;
+            }
+            let tail = &socket[i + 1..];
+            let name = tail.split('=').next()?;
+            (tail.contains('=') && name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric()))
+                .then_some(i)
+        })
+        .unwrap_or(socket.len());
+    Some(std::path::PathBuf::from(socket[..socket_end].trim()))
+}
+
 pub fn parse_inventory(text: &str) -> Result<Inventory, String> {
-    parse_inventory_with_sessions(text, &BTreeMap::new())
+    parse_inventory_with_sessions(text, &crate::session_names::SessionResolution::default())
 }
 
 fn parse_inventory_with_sessions(
     text: &str,
-    current_sessions: &BTreeMap<u32, String>,
+    current_sessions: &crate::session_names::SessionResolution,
 ) -> Result<Inventory, String> {
     let processes: Vec<_> = text
         .lines()
@@ -131,38 +161,22 @@ fn parse_inventory_with_sessions(
     }
     let mut servers = BTreeMap::new();
     let mut server_names = BTreeMap::new();
+    let mut disconnected_servers = Vec::new();
     for process in &processes {
-        let mut args = process.command.split_whitespace();
-        let executable = args.next().unwrap_or("");
-        if Path::new(executable).file_name().and_then(|s| s.to_str()) != Some("zellij")
-            || args.next() != Some("--server")
-        {
+        let Some(socket) = server_socket(process) else {
             continue;
-        }
-        // Server socket names can contain spaces. Environment values follow argv.
-        let socket_and_env = args.collect::<Vec<_>>().join(" ");
-        let socket = socket_and_env
-            .split(" ZELLIJ=")
-            .next()
-            .unwrap_or(&socket_and_env);
-        let socket = socket.split(" PATH=").next().unwrap_or(socket);
-        let socket_end = socket
-            .char_indices()
-            .find_map(|(i, c)| {
-                if c != ' ' {
-                    return None;
-                }
-                let tail = &socket[i + 1..];
-                let name = tail.split('=').next()?;
-                (tail.contains('=') && name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric()))
-                    .then_some(i)
-            })
-            .unwrap_or(socket.len());
-        let original_session = Path::new(socket[..socket_end].trim())
+        };
+        let original_session = socket
+            .as_path()
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("");
+        if current_sessions.displaced.contains(&process.pid) {
+            disconnected_servers.push(process.pid);
+            continue;
+        }
         let session = current_sessions
+            .names
             .get(&process.pid)
             .map(String::as_str)
             .unwrap_or(original_session);
@@ -179,6 +193,12 @@ fn parse_inventory_with_sessions(
         let Some(tool) = tool(&process.command) else {
             continue;
         };
+        if disconnected_servers
+            .iter()
+            .any(|pid| is_ancestor(&processes, *pid, process.pid))
+        {
+            continue;
+        }
         let Some(session) = env_value(&process.command, "ZELLIJ_SESSION_NAME") else {
             continue;
         };
@@ -271,11 +291,7 @@ pub fn inventory(runner: &dyn CommandRunner) -> Result<Inventory, String> {
         return Err("incomplete process inventory; previous state retained".into());
     }
     let sessions = crate::session_names::current_sessions(&parsed.processes);
-    if sessions.is_empty() {
-        Ok(parsed)
-    } else {
-        parse_inventory_with_sessions(&text, &sessions)
-    }
+    parse_inventory_with_sessions(&text, &sessions)
 }
 
 #[cfg(test)]
@@ -317,7 +333,14 @@ mod tests {
     fn renamed_server_owns_old_and_new_environments_when_old_name_is_reused() {
         let text = "10 1 Mon Oct 5 10:00:00 2026 zellij --server /tmp/old\n20 10 Mon Oct 5 10:01:00 2026 codex ZELLIJ_SESSION_NAME=old ZELLIJ_PANE_ID=7\n21 10 Mon Oct 5 10:02:00 2026 claude ZELLIJ_SESSION_NAME=new ZELLIJ_PANE_ID=8\n30 1 Mon Oct 5 10:03:00 2026 zellij --server /tmp/old\n40 30 Mon Oct 5 10:04:00 2026 codex ZELLIJ_SESSION_NAME=old ZELLIJ_PANE_ID=7\n";
         let names = BTreeMap::from([(10, "new".into()), (30, "old".into())]);
-        let inventory = parse_inventory_with_sessions(text, &names).unwrap();
+        let inventory = parse_inventory_with_sessions(
+            text,
+            &crate::session_names::SessionResolution {
+                names,
+                displaced: Default::default(),
+            },
+        )
+        .unwrap();
         assert_eq!(inventory.found.len(), 3);
         assert_eq!(inventory.found[0].identity.session_name, "new");
         assert_eq!(inventory.found[1].identity.session_name, "new");
@@ -334,6 +357,24 @@ mod tests {
             inventory.found[0].identity.session_epoch,
             inventory.found[2].identity.session_epoch
         );
+    }
+
+    #[test]
+    fn disconnected_server_descendants_are_not_rebound_to_replacement() {
+        let text = "10 1 Mon Oct 5 10:00:00 2026 zellij --server /tmp/dev\n20 10 Mon Oct 5 10:01:00 2026 codex ZELLIJ_SESSION_NAME=dev ZELLIJ_PANE_ID=7\n30 1 Mon Oct 5 10:03:00 2026 zellij --server /tmp/dev\n40 30 Mon Oct 5 10:04:00 2026 codex ZELLIJ_SESSION_NAME=dev ZELLIJ_PANE_ID=7\n";
+        let names = BTreeMap::from([(30, "dev".into())]);
+        let inventory = parse_inventory_with_sessions(
+            text,
+            &crate::session_names::SessionResolution {
+                names,
+                displaced: [10].into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(inventory.found.len(), 1);
+        assert_eq!(inventory.found[0].identity.pid, 40);
+        assert_eq!(inventory.epochs.len(), 1);
+        assert!(inventory.epochs["dev"].starts_with("30:"));
     }
 
     #[test]

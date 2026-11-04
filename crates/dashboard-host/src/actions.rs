@@ -109,9 +109,12 @@ pub fn link_launches(store: &mut dashboard_core::Store, inventory: &process::Inv
 }
 
 pub(crate) fn checked(target: &Identity, deps: &HostDependencies) -> Result<Agent, String> {
-    let pane = panes::require_present(target, deps)?;
     let inventory_at = now_ms();
     let inventory = process::inventory(deps.runner)?;
+    if !inventory.found.iter().any(|p| p.identity == *target) {
+        return Err("agent process changed or exited".into());
+    }
+    let pane = panes::require_present(target, deps)?;
     let mut locked = deps.repository.begin_runtime()?;
     locked.store.reconcile(&inventory.found, inventory_at);
     link_launches(&mut locked.store, &inventory);
@@ -889,6 +892,23 @@ mod tests {
         fn notify_changed(&self, _: &SessionId, _: &str) -> Result<(), String> {
             panic!("unexpected notify")
         }
+    }
+
+    #[test]
+    fn stale_target_is_rejected_before_querying_its_panes() {
+        let directory = tempfile::tempdir().unwrap();
+        let fake = FakeHost::default();
+        let target = fake.seed(directory.path());
+        fake.changed.set(true);
+        fake.routing.set(true);
+        let repository = crate::repository::at(directory.path());
+        let deps = HostDependencies {
+            repository: repository.as_ref(),
+            runner: &fake,
+            terminal: &fake,
+        };
+        assert!(checked(&target, &deps).is_err());
+        assert!(fake.calls.borrow().is_empty());
     }
 
     #[test]
