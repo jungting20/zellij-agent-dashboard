@@ -307,7 +307,7 @@ fi"#,
                 self.open_menu(MenuKind::Input);
                 self.edit_instruction();
             }
-            BareKey::Char('a') => self.open_menu(MenuKind::Alias),
+            BareKey::Char('a') => self.open_menu(MenuKind::Add),
             BareKey::Char('n') => self.open_menu(MenuKind::Recent),
             BareKey::Char('g') => self.open_menu(MenuKind::Worktree),
             BareKey::Char('m') => self.open_merge(),

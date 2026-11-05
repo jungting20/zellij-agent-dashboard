@@ -6,6 +6,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuKind {
+    Add,
     Input,
     Queue,
     QueueResume,
@@ -204,6 +205,7 @@ impl Menu {
             content.push(Line::color("처리 중…", 244, false));
         }
         let help = match self.kind {
+            MenuKind::Add => "a 에이전트 추가 · t 태그 · ↑↓ 선택 · Enter 적용 · Esc 닫기",
             MenuKind::Queue => "↑↓ 선택 · Enter 내용 · d 예약 취소 · r 중단 확인/재개 · Esc 닫기",
             MenuKind::Input => "Enter 전송/예약 · Alt+Enter 줄바꿈 · Ctrl+e 에디터 · Esc 취소",
             MenuKind::Recent => "검색/경로 입력 · ↑↓ 선택 · Enter 다음 · Esc 취소",

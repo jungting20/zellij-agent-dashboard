@@ -98,11 +98,13 @@ impl Dashboard {
                     .find(|a| Some(&a.identity.agent_id) == self.view.selected_id.as_ref())
             })
             .cloned();
-        if kind != MenuKind::Recent && kind != MenuKind::Requests && agent.is_none() {
+        if !matches!(kind, MenuKind::Add | MenuKind::Recent | MenuKind::Requests) && agent.is_none()
+        {
             self.message = "선택한 에이전트가 없습니다".into();
             return;
         }
         let title = match kind {
+            MenuKind::Add => "추가",
             MenuKind::Input => "프롬프트 · working 중 자동 예약",
             MenuKind::Queue => "예약 입력 큐",
             MenuKind::QueueResume => "예약 재개 확인",
@@ -113,6 +115,12 @@ impl Dashboard {
             _ => "작업",
         };
         let mut menu = Menu::new(kind, title, agent.as_ref().map(|a| a.identity.clone()));
+        if kind == MenuKind::Add {
+            menu.options = vec![
+                ("a: 에이전트 추가".into(), "agent".into()),
+                ("t: 태그".into(), "tag".into()),
+            ];
+        }
         if kind == MenuKind::Alias {
             menu.options = ALIASES
                 .iter()
@@ -334,23 +342,33 @@ impl Dashboard {
                 return;
             }
         }
-        let shortcut = if menu.kind == MenuKind::Worktree {
-            match key.bare_key {
+        let shortcut = match (menu.kind, key.bare_key) {
+            (MenuKind::Add, BareKey::Char('a')) => Some("agent"),
+            (MenuKind::Add, BareKey::Char('t')) => Some("tag"),
+            (MenuKind::Worktree, key) => match key {
                 BareKey::Char('a') => Some("add"),
                 BareKey::Char('s') => Some("shell"),
                 BareKey::Char('m') => Some("merge"),
                 BareKey::Char('t') => Some("children"),
                 BareKey::Char('g') => Some("lazygit"),
                 _ => None,
-            }
-        } else {
-            None
+            },
+            _ => None,
         };
         if key.bare_key == BareKey::Enter || shortcut.is_some() {
             let kind = menu.kind;
             let target = menu.target.clone();
             let chosen = shortcut.map(String::from).or_else(|| menu.chosen());
             match kind {
+                MenuKind::Add => {
+                    let next = match chosen.as_deref() {
+                        Some("agent") => MenuKind::Recent,
+                        Some("tag") => MenuKind::Alias,
+                        _ => return,
+                    };
+                    self.view.menu = None;
+                    self.open_menu(next);
+                }
                 MenuKind::Queue => {
                     let Some(id) = chosen else { return };
                     let text = self
