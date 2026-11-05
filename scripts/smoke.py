@@ -89,6 +89,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--real-claude", action="store_true", help="also start Claude without submitting a model request")
     parser.add_argument("--portable-paths", action="store_true", help="check aliases and ~/ host/state paths")
+    parser.add_argument("--add-menu-only", action="store_true", help="check Add popup, tags and keyboard launch only")
     args = parser.parse_args()
     zellij = shutil.which("zellij")
     assert zellij, "zellij is required"
@@ -213,6 +214,57 @@ load_plugins {{
             (directory / "focus-debug.json").write_text(json.dumps(diagnostics, indent=2))
         raise AssertionError(f"{description}: {last_error}; artifacts: {directory}")
 
+    def check_add_menu(target, focus_ui):
+        original_alias = next(a["alias"] for a in host_call("snapshot")["agents"]
+                              if a["identity"] == target["identity"])
+        os.write(clients[0].fd, b"a")
+        wait_for("a opens Add popup", lambda: any(p["menu"] == "Add" for p in ping(first, "dashboard")))
+        os.write(clients[0].fd, b"\x1b[27u")
+        wait_for("Escape closes Add and preserves selection", lambda: any(
+            p["menu"] is None and p["selected_id"] == target["identity"]["agent_id"]
+            for p in ping(first, "dashboard")))
+        os.write(clients[0].fd, b"aj\r")
+        wait_for("Add navigation and Enter open tag menu", lambda: any(
+            p["menu"] == "Alias" for p in ping(first, "dashboard")))
+        os.write(clients[0].fd, b"\x1b[27u")
+        wait_for("Escape closes tag menu", lambda: all(p["menu"] is None for p in ping(first, "dashboard")))
+        os.write(clients[0].fd, b"at")
+        wait_for("at opens existing tag menu", lambda: any(p["menu"] == "Alias" for p in ping(first, "dashboard")))
+        os.write(clients[0].fd, b"kkkkkkkkj\r")
+        wait_for("keyboard tag choice persists on selected agent", lambda: any(
+            a["identity"] == target["identity"] and a["alias"] == "implement"
+            for a in host_call("snapshot")["agents"]))
+        wait_for("tag action closes menu", lambda: all(p["menu"] is None for p in ping(first, "dashboard")))
+        assert host_call("action", json.dumps({"request_id": "restore-keyboard-tag", "action": {
+            "kind": "alias", "target": target["identity"], "alias": original_alias}}))["state"] == "succeeded"
+        ui_launch_dir = directory / "keyboard-launch"
+        ui_launch_dir.mkdir()
+        os.write(clients[0].fd, b"aa")
+        wait_for("aa loads existing directory catalog", lambda: any(
+            p["menu"] == "Recent" and not p["menu_busy"] for p in ping(first, "dashboard")))
+        os.write(clients[0].fd, (str(ui_launch_dir) + "\r").encode())
+        wait_for("directory choice opens existing tool menu", lambda: any(
+            p["menu"] == "Tool" for p in ping(first, "dashboard")))
+        os.write(clients[0].fd, b"\r")
+        def keyboard_launch():
+            return next((r for r in host_call("requests")
+                         if r["request"]["action"]["kind"] == "launch"
+                         and r["request"]["action"]["cwd"] == str(ui_launch_dir)
+                         and r["state"] == "succeeded"), None)
+        ui_launch = wait_for("keyboard Add flow launches agent", keyboard_launch)
+        try:
+            wait_for("keyboard-launched pane runs local fixture", lambda:
+                     (ui_launch_dir / "launch-args.log").exists()
+                     and (ui_launch_dir / "launch-args.log").read_text()
+                     == "--dangerously-bypass-approvals-and-sandbox")
+            assert ui_launch["request"]["action"]["tool"] == "codex"
+        finally:
+            call(first, "action", "close-pane", "--pane-id", f'terminal_{ui_launch["pane_id"]}')
+            call(first, "action", "focus-pane-id", focus_ui)
+        wait_for("dashboard returns after keyboard launch", lambda: any(
+            p["menu"] is None and p["selected_id"] == target["identity"]["agent_id"]
+            for p in ping(first, "dashboard")))
+
     try:
         for session in sessions:
             clients.append(Client([zellij, "--config-dir", str(config), "--session", session], directory))
@@ -234,13 +286,16 @@ load_plugins {{
         os.write(clients[0].fd, b"aa")
         wait_for("aa opens directory selection without an agent", lambda: any(
             p["menu"] == "Recent" and not p["menu_busy"] for p in ping(first, "dashboard")))
-        os.write(clients[0].fd, b"\x1b")
+        os.write(clients[0].fd, b"\x1b[27u")
         wait_for("Escape closes add flow", lambda: all(p["menu"] is None for p in ping(first, "dashboard")))
         os.write(clients[0].fd, b"n")
         wait_for("n retains direct new-agent flow", lambda: any(
             p["menu"] == "Recent" and not p["menu_busy"] for p in ping(first, "dashboard")))
-        os.write(clients[0].fd, b"\x1b")
+        os.write(clients[0].fd, b"\x1b[27u")
         wait_for("Escape closes direct new-agent flow", lambda: all(p["menu"] is None for p in ping(first, "dashboard")))
+        os.write(clients[0].fd, b"/" + b"\x7f" * len(f"{run_id}-no-agent") + b"\r")
+        wait_for("empty-selection check restores dashboard query", lambda: all(
+            p["query"] == "" for p in ping(first, "dashboard")))
         call(first, "action", "close-pane", "--pane-id", pane)
         before = max(p["polls"] for p in ping(first))
         wait_for("collector survives dashboard pane close", lambda: max(p["polls"] for p in ping(first)) > before)
@@ -283,6 +338,18 @@ fn main() {
         def discovered():
             return [a for a in host_call("snapshot")["agents"] if a["identity"]["session_name"] in sessions and a["tool"] == "codex"]
         rows = wait_for("discovery across two sessions including spaces", lambda: discovered() if len(discovered()) == 2 else None)
+        if args.add_menu_only:
+            target = next(a for a in rows if a["identity"]["session_name"] == first)
+            focus_ui = call(first, "plugin", "--floating", "--configuration", f"mode=dashboard,{base_config}", "--", f"file:{wasm}").strip()
+            wait_for("focused Add dashboard loaded", lambda: any(p["permissions"] and p["revision"] is not None
+                     for p in ping(first, "dashboard")))
+            os.write(clients[0].fd, f"/{first}\r".encode())
+            wait_for("focused Add dashboard selects fixture", lambda: any(
+                p["selected_id"] == target["identity"]["agent_id"] for p in ping(first, "dashboard")))
+            check_add_menu(target, focus_ui)
+            (directory / "result.json").write_text(json.dumps({"passed": True, "add_menu": True, "sessions": sessions}, indent=2))
+            print(f"Artifacts: {directory}", flush=True)
+            return
         initial_ui = call(first, "plugin", "--configuration", f"mode=dashboard,{base_config}", "--", f"file:{wasm}").strip()
         current_id = next(a["identity"]["agent_id"] for a in rows if a["identity"]["session_name"] == first)
         wait_for("initial dashboard selection prefers current session", lambda: any(
@@ -560,53 +627,7 @@ fn main() {
         os.write(clients[0].fd, f"/{sessions[1]}\r".encode())
         wait_for("keyboard search selects requested agent", lambda: any(p["selected_id"] == target["identity"]["agent_id"]
                  and p["query"] == sessions[1] for p in ping(first, "dashboard")))
-        os.write(clients[0].fd, b"a")
-        wait_for("a opens Add popup", lambda: any(p["menu"] == "Add" for p in ping(first, "dashboard")))
-        os.write(clients[0].fd, b"\x1b")
-        wait_for("Escape closes Add and preserves selection", lambda: any(
-            p["menu"] is None and p["selected_id"] == target["identity"]["agent_id"]
-            for p in ping(first, "dashboard")))
-        os.write(clients[0].fd, b"aj\r")
-        wait_for("Add navigation and Enter open tag menu", lambda: any(
-            p["menu"] == "Alias" for p in ping(first, "dashboard")))
-        os.write(clients[0].fd, b"\x1b")
-        wait_for("Escape closes tag menu", lambda: all(p["menu"] is None for p in ping(first, "dashboard")))
-        os.write(clients[0].fd, b"at")
-        wait_for("at opens existing tag menu", lambda: any(p["menu"] == "Alias" for p in ping(first, "dashboard")))
-        os.write(clients[0].fd, b"kkkkkkkkj\r")
-        wait_for("keyboard tag choice persists on selected agent", lambda: any(
-            a["identity"] == target["identity"] and a["alias"] == "implement"
-            for a in host_call("snapshot")["agents"]))
-        wait_for("tag action closes menu", lambda: all(p["menu"] is None for p in ping(first, "dashboard")))
-        assert host_call("action", json.dumps({"request_id": "restore-keyboard-tag", "action": {
-            "kind": "alias", "target": target["identity"], "alias": "SQLite 보존 확인"}}))["state"] == "succeeded"
-        ui_launch_dir = directory / "keyboard-launch"
-        ui_launch_dir.mkdir()
-        os.write(clients[0].fd, b"aa")
-        wait_for("aa loads existing directory catalog", lambda: any(
-            p["menu"] == "Recent" and not p["menu_busy"] for p in ping(first, "dashboard")))
-        os.write(clients[0].fd, (str(ui_launch_dir) + "\r").encode())
-        wait_for("directory choice opens existing tool menu", lambda: any(
-            p["menu"] == "Tool" for p in ping(first, "dashboard")))
-        os.write(clients[0].fd, b"\r")
-        def keyboard_launch():
-            return next((r for r in host_call("requests")
-                         if r["request"]["action"]["kind"] == "launch"
-                         and r["request"]["action"]["cwd"] == str(ui_launch_dir)
-                         and r["state"] == "succeeded"), None)
-        ui_launch = wait_for("keyboard Add flow launches agent", keyboard_launch)
-        try:
-            wait_for("keyboard-launched pane runs local fixture", lambda:
-                     (ui_launch_dir / "launch-args.log").exists()
-                     and (ui_launch_dir / "launch-args.log").read_text()
-                     == "--dangerously-bypass-approvals-and-sandbox")
-            assert ui_launch["request"]["action"]["tool"] == "codex"
-        finally:
-            call(first, "action", "close-pane", "--pane-id", f'terminal_{ui_launch["pane_id"]}')
-            call(first, "action", "focus-pane-id", focus_ui)
-        wait_for("dashboard returns after keyboard launch", lambda: any(
-            p["menu"] is None and p["selected_id"] == target["identity"]["agent_id"]
-            for p in ping(first, "dashboard")))
+        check_add_menu(target, focus_ui)
         # gg must open the selected remote agent's repository over this dashboard.
         def lazygit_panes(session):
             return [p for p in json.loads(call(session, "action", "list-panes", "--all", "--json"))
