@@ -237,8 +237,8 @@ load_plugins {{
         wait_for("tag action closes menu", lambda: all(p["menu"] is None for p in ping(first, "dashboard")))
         assert host_call("action", json.dumps({"request_id": "restore-keyboard-tag", "action": {
             "kind": "alias", "target": target["identity"], "alias": original_alias}}))["state"] == "succeeded"
-        ui_launch_dir = directory / "keyboard-launch"
-        ui_launch_dir.mkdir()
+        ui_launch_dir = directory
+        (ui_launch_dir / "launch-args.log").unlink(missing_ok=True)
         os.write(clients[0].fd, b"aa")
         wait_for("aa loads existing directory catalog", lambda: any(
             p["menu"] == "Recent" and not p["menu_busy"] for p in ping(first, "dashboard")))
