@@ -4,5 +4,6 @@
   "savedTokens": 0,
   "injectedPointers": [],
   "nudges": 0,
-  "promptAsks": 3
+  "promptAsks": 3,
+  "summarized": true
 }

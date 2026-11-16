@@ -253,6 +253,10 @@ impl Dashboard {
     }
 
     pub(super) fn edit_instruction(&mut self) {
+        if self.view.source_session.is_empty() {
+            self.message = "대시보드의 Zellij 세션을 확인할 수 없습니다".into();
+            return;
+        }
         let Some(menu) = self.view.menu.as_ref() else {
             return;
         };
@@ -262,6 +266,7 @@ impl Dashboard {
         self.submit(Action::Editor {
             target,
             text: menu.input.text.clone(),
+            session: Some(self.view.source_session.clone()),
         });
     }
 

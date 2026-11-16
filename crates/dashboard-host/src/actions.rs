@@ -606,7 +606,15 @@ fn execute(
             )?)?;
             Ok(("Neovim 실행 완료".into(), Some(pane), String::new()))
         }
-        Action::Editor { target, text } => {
+        Action::Editor {
+            target,
+            text,
+            session,
+        } => {
+            let session = session.as_deref().unwrap_or(&target.session_name);
+            if session.is_empty() {
+                return Err("대시보드의 Zellij 세션을 확인할 수 없습니다".into());
+            }
             let agent = checked(target, deps)?;
             let path = dir.join(format!("edit-{}.txt", uuid::Uuid::new_v4()));
             fs::write(&path, text).map_err(|e| e.to_string())?;
@@ -618,7 +626,7 @@ fn execute(
             // EDITOR is a user command; the filename is a positional argument.
             let script = format!("exec {editor} \"$1\"");
             let pane = pane_number(&deps.terminal.new_pane(
-                &SessionId(target.session_name.clone()),
+                &SessionId(session.into()),
                 &NewPane {
                     tab_id: None,
                     cwd: agent.cwd.into(),
@@ -753,11 +761,14 @@ pub fn result(
 
 pub fn edited(id: &str, deps: &HostDependencies) -> Result<serde_json::Value, String> {
     let result = result(deps.repository, id)?;
-    let Action::Editor { target, .. } = &result.request.action else {
+    let Action::Editor {
+        target, session, ..
+    } = &result.request.action
+    else {
         return Err("request is not an editor action".into());
     };
     let panes = deps.terminal.list_panes(
-        &SessionId(target.session_name.clone()),
+        &SessionId(session.as_ref().unwrap_or(&target.session_name).clone()),
         false,
         Duration::from_millis(1200),
     )?;
@@ -790,6 +801,8 @@ mod tests {
         routing: Cell<bool>,
         change_after_paste: Cell<bool>,
         calls: RefCell<Vec<String>>,
+        editor_session: RefCell<Option<String>>,
+        editor_open: Cell<bool>,
     }
     impl FakeHost {
         fn inventory_text(&self) -> String {
@@ -837,9 +850,34 @@ mod tests {
         fn list_panes(
             &self,
             session: &SessionId,
-            _: bool,
+            all_tabs: bool,
             _: Duration,
         ) -> Result<Vec<TerminalPane>, String> {
+            if let Some(editor_session) = self.editor_session.borrow().as_ref() {
+                if all_tabs {
+                    assert_eq!(session.0, "dev");
+                    return Ok(vec![TerminalPane {
+                        id: pane_id(7),
+                        tab_id: None,
+                        tab_name: String::new(),
+                        title: String::new(),
+                        cwd: Some("/tmp".into()),
+                    }]);
+                }
+                assert_eq!(&session.0, editor_session);
+                self.calls.borrow_mut().push(format!("list:{}", session.0));
+                return Ok(if self.editor_open.get() {
+                    vec![TerminalPane {
+                        id: pane_id(7),
+                        tab_id: None,
+                        tab_name: String::new(),
+                        title: "지시 편집".into(),
+                        cwd: Some("/tmp".into()),
+                    }]
+                } else {
+                    vec![]
+                });
+            }
             if self.routing.get() {
                 self.calls.borrow_mut().push(session.0.clone());
                 if session.0 != "dev" {
@@ -886,12 +924,93 @@ mod tests {
             self.calls.borrow_mut().push("close".into());
             Ok(())
         }
-        fn new_pane(&self, _: &SessionId, _: &NewPane) -> Result<PaneId, String> {
+        fn new_pane(&self, session: &SessionId, options: &NewPane) -> Result<PaneId, String> {
+            if let Some(editor_session) = self.editor_session.borrow().as_ref() {
+                assert_eq!(&session.0, editor_session);
+                assert_eq!(options.title, "지시 편집");
+                assert!(options.floating && options.close_on_exit && !options.no_focus);
+                self.calls.borrow_mut().push(format!("new:{}", session.0));
+                return Ok(pane_id(7));
+            }
             panic!("unexpected new pane")
         }
         fn notify_changed(&self, _: &SessionId, _: &str) -> Result<(), String> {
             panic!("unexpected notify")
         }
+    }
+
+    #[test]
+    fn editor_creation_and_recovery_use_persisted_session() {
+        for session in [Some("dashboard"), None] {
+            let dir = tempfile::tempdir().unwrap();
+            let fake = FakeHost::default();
+            let target = fake.seed(dir.path());
+            *fake.editor_session.borrow_mut() = Some(session.unwrap_or("dev").into());
+            fake.editor_open.set(true);
+            let request = ActionRequest {
+                request_id: "editor-session".into(),
+                action: Action::Editor {
+                    target,
+                    text: "original prompt".into(),
+                    session: session.map(str::to_owned),
+                },
+            };
+            let repository = crate::repository::at(dir.path());
+            let deps = HostDependencies {
+                repository: repository.as_ref(),
+                runner: &fake,
+                terminal: &fake,
+            };
+            let result = action(dir.path(), request.clone(), &deps).unwrap();
+            assert_eq!(result.state, RequestState::Succeeded);
+            assert_eq!(action(dir.path(), request, &deps).unwrap().pane_id, Some(7));
+            assert_eq!(fake.calls.borrow().len(), 1);
+
+            let restored_repository = crate::repository::at(dir.path());
+            let restored_deps = HostDependencies {
+                repository: restored_repository.as_ref(),
+                runner: &fake,
+                terminal: &fake,
+            };
+            assert_eq!(
+                edited("editor-session", &restored_deps).unwrap()["ready"],
+                false
+            );
+            fs::write(result.path, "edited prompt").unwrap();
+            fake.editor_open.set(false);
+            let recovered = edited("editor-session", &restored_deps).unwrap();
+            assert_eq!(recovered["ready"], true);
+            assert_eq!(recovered["text"], "edited prompt");
+        }
+    }
+
+    #[test]
+    fn editor_rejects_empty_destination_before_external_operations() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeHost::default();
+        let target = fake.seed(dir.path());
+        fake.changed.set(true);
+        let repository = crate::repository::at(dir.path());
+        let deps = HostDependencies {
+            repository: repository.as_ref(),
+            runner: &fake,
+            terminal: &fake,
+        };
+        let error = execute(
+            dir.path(),
+            &ActionRequest {
+                request_id: "empty-editor-session".into(),
+                action: Action::Editor {
+                    target,
+                    text: "prompt".into(),
+                    session: Some(String::new()),
+                },
+            },
+            &deps,
+        )
+        .unwrap_err();
+        assert!(error.contains("Zellij 세션"));
+        assert!(fake.calls.borrow().is_empty());
     }
 
     #[test]

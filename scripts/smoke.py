@@ -90,6 +90,7 @@ def main():
     parser.add_argument("--real-claude", action="store_true", help="also start Claude without submitting a model request")
     parser.add_argument("--portable-paths", action="store_true", help="check aliases and ~/ host/state paths")
     parser.add_argument("--add-menu-only", action="store_true", help="check Add popup, tags and keyboard launch only")
+    parser.add_argument("--editor-only", action="store_true", help="check cross-session prompt editor and restored draft")
     args = parser.parse_args()
     zellij = shutil.which("zellij")
     assert zellij, "zellij is required"
@@ -213,6 +214,40 @@ load_plugins {{
                                         "dashboard": ping(session, "dashboard") if session == sessions[0] else []}
             (directory / "focus-debug.json").write_text(json.dumps(diagnostics, indent=2))
         raise AssertionError(f"{description}: {last_error}; artifacts: {directory}")
+
+    def check_prompt_editor(target):
+        def editors(session):
+            return [p for p in json.loads(call(session, "action", "list-panes", "--all", "--json"))
+                    if not p["is_plugin"] and p["title"] == "지시 편집"]
+        os.write(clients[0].fd, b"I")
+        pane = wait_for("I opens prompt editor in dashboard session", lambda: next(iter(editors(first)), None))
+        assert pane["is_floating"]
+        assert not editors(target["identity"]["session_name"])
+        record = next(r for r in host_call("requests") if r["request"]["action"]["kind"] == "editor")
+        assert record["state"] == "succeeded"
+        assert record["request"]["action"]["target"] == target["identity"]
+        assert host_call("action", json.dumps(record["request"]))["pane_id"] == pane["id"]
+        assert len(editors(first)) == 1
+        assert host_call("edited", record["request"]["request_id"])["ready"] is False
+        draft = "cross-session draft\n두 번째 줄\n"
+        Path(record["path"]).write_text(draft)
+        call(first, "action", "write", "--pane-id", f'terminal_{pane["id"]}', "27")
+        call(first, "action", "write-chars", "--pane-id", f'terminal_{pane["id"]}', ":qa!")
+        call(first, "action", "write", "--pane-id", f'terminal_{pane["id"]}', "13")
+        wait_for("closing prompt editor restores Input menu", lambda: not editors(first) and any(
+            p["menu"] == "Input" and not p["menu_busy"] for p in ping(first, "dashboard")))
+        restored = host_call("edited", record["request"]["request_id"])
+        assert restored["ready"] and restored["text"] == draft and restored["target"] == target["identity"]
+        os.write(clients[0].fd, b"\x05")
+        reopened = wait_for("Ctrl+e reopens restored draft in dashboard session", lambda: next(iter(editors(first)), None))
+        second = wait_for("restored draft is passed back to editor", lambda: next((r for r in host_call("requests")
+            if r["request"]["action"]["kind"] == "editor" and r["path"] != record["path"]
+            and r["request"]["action"]["text"] == draft), None))
+        assert Path(second["path"]).read_text() == draft
+        call(first, "action", "close-pane", "--pane-id", f'terminal_{reopened["id"]}')
+        wait_for("second editor closes", lambda: not editors(first))
+        os.write(clients[0].fd, b"\x1b[27u")
+        print("PASS prompt editor preserves target, draft, and duplicate request identity", flush=True)
 
     def check_add_menu(target, focus_ui):
         original_alias = next(a["alias"] for a in host_call("snapshot")["agents"]
@@ -338,6 +373,18 @@ fn main() {
         def discovered():
             return [a for a in host_call("snapshot")["agents"] if a["identity"]["session_name"] in sessions and a["tool"] == "codex"]
         rows = wait_for("discovery across two sessions including spaces", lambda: discovered() if len(discovered()) == 2 else None)
+        if args.editor_only:
+            target = next(a for a in rows if a["identity"]["session_name"] == sessions[1])
+            call(first, "plugin", "--floating", "--configuration", f"mode=dashboard,{base_config}", "--", f"file:{wasm}")
+            wait_for("editor dashboard loaded", lambda: any(p["permissions"] and p["revision"] is not None
+                     for p in ping(first, "dashboard")))
+            os.write(clients[0].fd, f"/{sessions[1]}\r".encode())
+            wait_for("editor dashboard selects remote agent", lambda: any(
+                p["selected_id"] == target["identity"]["agent_id"] for p in ping(first, "dashboard")))
+            check_prompt_editor(target)
+            (directory / "result.json").write_text(json.dumps({"passed": True, "editor": True, "sessions": sessions}, indent=2))
+            print(f"Artifacts: {directory}", flush=True)
+            return
         if args.add_menu_only:
             target = next(a for a in rows if a["identity"]["session_name"] == first)
             focus_ui = call(first, "plugin", "--floating", "--configuration", f"mode=dashboard,{base_config}", "--", f"file:{wasm}").strip()
@@ -628,6 +675,7 @@ fn main() {
         wait_for("keyboard search selects requested agent", lambda: any(p["selected_id"] == target["identity"]["agent_id"]
                  and p["query"] == sessions[1] for p in ping(first, "dashboard")))
         check_add_menu(target, focus_ui)
+        check_prompt_editor(target)
         # gg must open the selected remote agent's repository over this dashboard.
         def lazygit_panes(session):
             return [p for p in json.loads(call(session, "action", "list-panes", "--all", "--json"))

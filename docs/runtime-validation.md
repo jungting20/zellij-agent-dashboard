@@ -12,6 +12,8 @@
 
 `bash scripts/build.sh`, `bash scripts/install.sh`를 실행하고 오류 요청의 출처인 `architecture-study-web`의 collector ID 0만 reload했다. 기존 ID와 collector 하나를 유지했고 권한 승인·Connected·error=null·poll 2→3 증가를 확인했다. 열린 dashboard는 없었다. 설치 host/WASM과 dist의 SHA-256 일치를 확인했으며 적용 기록은 `.local/orphan-session/applied.json`이다. 설치 후 공용 스냅샷에서 이전 `easyDesk` 실행이 사라진 것도 확인했다. 기존 실패 요청은 재전송하지 않았다.
 
+사용자의 전체 세션 적용 요청에 따라 실행 중인 `study`, `운영`, `loop`, `zellij-with-code-agent`, `wiki`, `hermes`, `architecture-study-web`, `easydesk`, `k3s-study` 9개 세션의 collector를 reload했다. 각 세션에서 기존 ID 0과 collector 하나 유지, 권한 승인·Connected·error=null·reload 후 poll 증가를 확인했다. 열린 dashboard는 없었으며 다음 열기부터 설치본을 사용한다. 종료 상태인 `easyDesk`는 복원하지 않았다. 임시 연결 클라이언트는 정리했고 최종 실행 세션 목록과 적용 목록이 일치하는지 확인했다. 설치 host/WASM과 dist의 SHA-256도 일치한다. 결과는 `.local/orphan-session/applied-all.json`이다.
+
 ## 2026-10-28 waiting floating pane 알림 제거
 
 사용자 요청으로 알림 전용 코어·호스트 모듈, collector의 알림 동기화, notification 플러그인 모드와 전용 smoke 스크립트를 제거했다. 빌드·설치에서는 대시보드 WASM과 host만 배포하고 이전 알림 WASM을 정리한다. waiting 상태 감지와 대시보드 표시는 유지하며 저장 구조와 스키마는 변경하지 않는다. 아래 2026-10-23 알림 기록은 제거 전 이력이다.
@@ -421,3 +423,16 @@ Zellij 0.45.0에서 background attach 직후에는 초기 pane의 cwd 메타데�
 `bash scripts/check.sh`의 포맷·workspace 테스트(48+68+6 통과, 수동 성능 1개 제외)·host/WASM Clippy와 release host/WASM 빌드가 통과했다. 기본 탭 이름이 프로젝트 이름과 달라도 cwd로 찾고 정확한 tab ID를 rename하는 회귀 검사를 포함한다.
 
 검증 후 `bash scripts/build.sh`와 `bash scripts/install.sh`를 실행하고, 당시 실행 중인 `운영`, `study`, `hermes`, `zellij-with-code-agent`, `loop-graph` 5개 세션의 collector를 reload했다. 각 세션에서 기존 collector ID 유지·중복 없음·권한 승인·오류 없음·Connected·poll 증가를 확인했다. 열린 대시보드는 없었으며 다음 열기부터 설치본을 사용한다. 검증용 attach만 종료했고, 설치본/dist host·WASM SHA-256 일치를 확인했다. 종료된 `rea`는 제외했다. 적용 기록은 `.local/apply-default-layout.json`이다.
+
+
+## 2026-11-12 지시 편집기의 대시보드 세션 유지
+
+`I`는 선택한 에이전트 세션에 편집기를 열어, 다른 세션에서 대시보드를 사용할 때 아무 반응이 없는 것처럼 보였다. 수정 전 `python3 scripts/smoke.py --editor-only`는 `I opens prompt editor in dashboard session`에서 실패했다. 요청은 성공으로 저장됐지만 대시보드 세션에 창이 없었다. 재현 기록은 `.local/editor-before.log`와 `.local/smoke-1217dc9048`에 있다.
+
+새 편집 요청은 대시보드 세션을 저장하고 생성과 종료 확인에 같은 세션을 사용한다. 필드 없는 기존 요청은 원래 에이전트 세션을 유지한다. 코어 49개와 호스트 72개 테스트가 통과했고 수동 타이밍 검사 1개는 제외됐다. 추가 빈 세션 회귀 검사 1개, 포맷 검사와 host/WASM 빌드도 통과했다.
+
+Zellij 0.45.0 임시 세션 두 개에서 Neovim을 사용해 대문자 `I`, 다른 세션의 대상 선택, floating 편집기 위치, 중복 요청의 동일 pane 반환, 종료 후 여러 줄 입력 복원, `Ctrl-e` 재편집과 원래 대상 보존을 확인했다. 수정 후 검증은 통과했으며 `.local/editor-after.log`와 `.local/smoke-cbc74df9e2/result.json`에 기록했다. 임시 세션을 종료했고 기존 전체 smoke는 이번에 실행하지 않았다.
+
+최종 검증 후 `bash scripts/build.sh`와 `bash scripts/install.sh`로 설치하고 현재 작업 세션 `easydesk`의 collector를 reload했다. 기존 plugin ID 0 유지, 권한 승인과 오류 없음, poll 2→3 증가를 확인했다. 당시 열린 대시보드는 없어 다음 열기부터 설치본을 사용한다. 다른 세션은 reload하지 않았다. 설치본과 dist 해시는 일치하며 `.local/apply-prompt-editor.json`에 적용 결과를 기록했다. 이전 설치본과 SQLite 백업은 `.local/prompt-editor-backup-20261112`에 보존했다.
+
+사용자의 전체 세션 적용 요청에 따라 실행 중인 `운영`, `study`, `zellij-with-code-agent`, `wiki`, `loop`, `easydesk` 6개 세션에 같은 수정본을 reload했다. 모든 세션에서 collector ID 0 유지·중복 없음·권한 승인·오류 없음·Connected 응답과 poll 증가를 확인했다. 열린 대시보드는 없어 다음 열기부터 적용된다. 설치본과 dist 해시 및 최종 실행 세션 목록과 적용 목록의 일치를 확인했다. 적용 기록은 `.local/apply-prompt-editor-all.json`에 있다.
