@@ -67,6 +67,10 @@ CLI에서는 `bash scripts/open-dashboard.sh SESSION_NAME`으로 같은 동작�
 
 `Alt i`와 `Alt p`의 idle 이동은 실행별 마지막 `working → idle` 전환 시각이 최신인 순서로 순환한다. 현재 실행이 후보이면 그 다음으로 오래된 후보로 이동하고, 후보가 아니면 최신 후보부터 시작한다. 끝에서는 최신 후보로 돌아간다. 전환 기록이 없는 초기 idle·이전 버전의 실행은 뒤에 두고, 시각이 같은 경우에는 표시 순서를 유지한다. 같은 idle의 반복 관측은 순서를 바꾸지 않는다. 해당 대상이 없으면 이동하지 않는다.
 
+대시보드에서 `b`를 누르면 이전 pane으로 돌아간다. 대시보드 `Enter`와 전역 `agent-next`는 이동 전의 터미널 pane을 최대 10개 저장한다. 같은 pane에 머무르면 기록을 추가하지 않으며, 닫힌 pane이나 교체된 에이전트 실행은 건너뛴다. 현재 이동의 도착 pane에서 연속으로 돌아갈 수 있고, 다른 pane에서 새 이동을 시작하면 그 pane부터 새 기록을 쌓는다. 일반 셸 pane과 다른 세션의 pane도 돌아갈 수 있다. 대시보드에서는 floating 창 아래의 터미널 pane을 출발점으로 사용한다.
+
+기록은 상태 디렉터리의 `navigation-v1.json`에 저장되어 collector 재로딩 뒤에도 남는다. 파일이 없으면 빈 기록으로 시작한다. 기록을 초기화하거나 JSON이 손상된 경우 해당 파일을 옮긴 뒤 다시 이동하면 새 파일이 생성된다.
+
 working(또는 compact) 중 `i`로 보낸 지시는 에이전트별 예약 큐에 FIFO로 추가한다. idle에서 예약이 없으면 즉시 전송하며, 이미 대기/전송 중인 예약이 있으면 그 뒤에 추가해 순서를 유지한다. collector가 idle 화면 또는 훅의 턴 완료를 확인하면 하나를 전송하고, 해당 지시의 working 시작과 다음 idle/턴 완료가 확인되어야 다음 항목을 전송한다. 여러 지시는 입력창을 다시 열어 하나씩 추가한다. 한 실행당 최대 32개·전체 텍스트 64 KiB다.
 
 `Q`에서 진행 상태와 대기 목록을 확인한다. Enter는 전체 내용 보기, `d`는 선택한 대기 항목 취소다. 전송 결과 불명확·작업 실패·시작 확인 시간 초과 시 자동 진행과 재전송을 멈춘다. 실제 에이전트에서 전송 여부를 확인한 뒤 `Q` → `r`의 확인 메뉴에서 재개하면 불명확한 항목은 다시 보내지 않고 다음 예약부터 진행한다. 전송/실행 중인 항목은 `d`로 취소하거나 중단하지 않는다. collector reload 후 큐는 보존되며, 에이전트가 종료·교체되면 이전 예약을 새 실행에 전달하지 않는다. 화면 관측 사이에 짧은 작업이 끝나 시작을 확인하지 못한 경우에도 자동 추정 대신 확인 대기로 멈춘다.
@@ -91,6 +95,12 @@ keybinds {
                 payload "pinned-only"
             }
         }
+        bind "Alt b" {
+            MessagePlugin "agent-dashboard" {
+                mode "collector"
+                name "agent-prev"
+            }
+        }
     }
 }
 load_plugins {
@@ -100,7 +110,7 @@ load_plugins {
 }
 ```
 
-같은 `MessagePlugin` 설정에 아래 키와 payload를 적용한다.
+`Alt b`는 대시보드가 닫힌 상태에서도 이전 pane으로 돌아간다. 아래 이동 키는 `agent-next`와 해당 payload를 사용한다.
 
 | 키 | payload | 대상 |
 |---|---|---|
@@ -121,6 +131,7 @@ Claude, Codex, Cursor CLI(`agent`), Gemini(`agy`/`gemini`), Hermes와 Pi(`pi` �
 ```sh
 ./scripts/check.sh
 python3 scripts/smoke.py
+python3 scripts/smoke.py --navigation-only
 python3 scripts/smoke.py --portable-paths
 python3 scripts/smoke.py --real-claude
 ```

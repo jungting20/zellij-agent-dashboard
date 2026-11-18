@@ -91,6 +91,7 @@ def main():
     parser.add_argument("--portable-paths", action="store_true", help="check aliases and ~/ host/state paths")
     parser.add_argument("--add-menu-only", action="store_true", help="check Add popup, tags and keyboard launch only")
     parser.add_argument("--editor-only", action="store_true", help="check cross-session prompt editor and restored draft")
+    parser.add_argument("--navigation-only", action="store_true", help="check next and previous pane history")
     args = parser.parse_args()
     zellij = shutil.which("zellij")
     assert zellij, "zellij is required"
@@ -132,6 +133,14 @@ show_release_notes false
                 state_dir "{state_path}"
                 name "agent-next"
                 payload "pinned-only"
+            }}
+        }}
+        bind "Alt b" {{
+            MessagePlugin "{plugin_url}" {{
+                mode "collector"
+                host_path "{host_path}"
+                state_dir "{state_path}"
+                name "agent-prev"
             }}
         }}
         bind "Alt i" {{
@@ -334,8 +343,9 @@ load_plugins {{
         call(first, "action", "close-pane", "--pane-id", pane)
         before = max(p["polls"] for p in ping(first))
         wait_for("collector survives dashboard pane close", lambda: max(p["polls"] for p in ping(first)) > before)
-        clients.append(Client([zellij, "attach", first], directory))
-        wait_for("collector with two attached clients", lambda: any(p["permissions"] for p in ping(first)))
+        if not args.navigation_only:
+            clients.append(Client([zellij, "attach", first], directory))
+            wait_for("collector with two attached clients", lambda: any(p["permissions"] for p in ping(first)))
 
         # A fixture executable named codex tests discovery without inference.
         fake = directory / "codex"
@@ -373,6 +383,60 @@ fn main() {
         def discovered():
             return [a for a in host_call("snapshot")["agents"] if a["identity"]["session_name"] in sessions and a["tool"] == "codex"]
         rows = wait_for("discovery across two sessions including spaces", lambda: discovered() if len(discovered()) == 2 else None)
+        if args.navigation_only:
+            def focused(session):
+                return [line.split()[1] for line in call(session, "action", "list-clients").splitlines()
+                        if re.match(r"^\d+\s+", line)]
+
+            clients[1].stop()
+            first_agent, remote_agent = [next(a for a in rows if a["identity"]["session_name"] == session)
+                                         for session in sessions]
+            first_pane, remote_pane = [f'terminal_{a["identity"]["pane_id"]}' for a in (first_agent, remote_agent)]
+            shell = next(p for p in json.loads(call(first, "action", "list-panes", "--json"))
+                         if not p["is_plugin"] and f'terminal_{p["id"]}' != first_pane)
+            shell_pane = f'terminal_{shell["id"]}'
+            host_call("pin", remote_agent["identity"]["agent_id"], "true")
+
+            def open_dashboard():
+                pane = call(first, "plugin", "--floating", "--configuration", f"mode=dashboard,{base_config}",
+                            "--", f"file:{wasm}").strip()
+                wait_for("floating dashboard receives keyboard input", lambda: focused(first) == [pane]
+                         and any(p["revision"] is not None for p in ping(first, "dashboard")))
+
+            def select_local_from_shell():
+                call(first, "action", "focus-pane-id", shell_pane)
+                open_dashboard()
+                os.write(clients[0].fd, f"/{first}\r".encode())
+                wait_for("dashboard selects local fixture", lambda: any(
+                    p["selected_id"] == first_agent["identity"]["agent_id"] for p in ping(first, "dashboard")))
+                os.write(clients[0].fd, b"\r")
+                wait_for("Enter moves from shell to local agent", lambda: focused(first) == [first_pane])
+
+            def jump_remote():
+                os.write(clients[0].fd, b"\x1bu")
+                wait_for("Alt u moves to the remote agent", lambda: focused(sessions[1]) == [remote_pane]
+                         and not focused(first))
+
+            select_local_from_shell()
+            jump_remote()
+            call(sessions[1], "action", "start-or-reload-plugin", f"file:{wasm}",
+                 "--configuration", f"mode=collector,{base_config}")
+            wait_for("destination collector responds after reload", lambda: any(
+                p["revision"] is not None for p in ping(sessions[1])))
+            os.write(clients[0].fd, b"\x1bb")
+            wait_for("Alt b returns across sessions after collector reload", lambda: focused(first) == [first_pane])
+            open_dashboard()
+            os.write(clients[0].fd, b"b")
+            wait_for("dashboard b returns to the shell saved by Enter", lambda: focused(first) == [shell_pane])
+
+            select_local_from_shell()
+            jump_remote()
+            call(first, "action", "close-pane", "--pane-id", first_pane)
+            os.write(clients[0].fd, b"\x1bb")
+            wait_for("Alt b skips the closed agent and returns to the shell", lambda: focused(first) == [shell_pane])
+            (directory / "result.json").write_text(json.dumps({"passed": True, "agent_prev": True}, indent=2))
+            print(f"Artifacts: {directory}", flush=True)
+            return
         if args.editor_only:
             target = next(a for a in rows if a["identity"]["session_name"] == sessions[1])
             call(first, "plugin", "--floating", "--configuration", f"mode=dashboard,{base_config}", "--", f"file:{wasm}")

@@ -1,4 +1,7 @@
-use dashboard_core::{view::View, Agent, Liveness, PaneOutput, Snapshot, SCHEMA_VERSION};
+use dashboard_core::{
+    view::View, Agent, Liveness, NavigationAction, NavigationRequest, PaneOutput, PaneVisit,
+    Snapshot, SCHEMA_VERSION,
+};
 use std::{collections::BTreeMap, path::Path};
 use zellij_tile::prelude::*;
 #[path = "controls.rs"]
@@ -35,7 +38,9 @@ pub struct Dashboard {
     next_queue: dashboard_core::NextQueue,
     next_pending: bool,
     next_check_pending: bool,
-    next_origin: Option<(String, u32)>,
+    navigation_target: Option<PaneVisit>,
+    dashboard_origin: Option<u32>,
+    dashboard_navigation_pending: bool,
     next_messages: u64,
     next_source: Option<String>,
     window_requested: bool,
@@ -74,7 +79,7 @@ impl Dashboard {
         );
     }
 
-    fn start_next(&mut self, origin: Option<(String, u32)>) {
+    fn start_next(&mut self) {
         if self.next_pending
             || !self.permissions
             || self.config_error.is_some()
@@ -85,7 +90,6 @@ impl Dashboard {
         if self.next_queue.is_empty() || self.next_check_pending {
             return;
         }
-        self.next_origin = origin;
         self.next_check_pending = true;
         list_clients();
     }
@@ -99,10 +103,10 @@ impl Dashboard {
         // one currently attached client before starting any host command.
         if clients.iter().map(|c| c.client_id).min() != self.client_id {
             self.next_queue.clear();
-            self.next_origin = None;
+            self.navigation_target = None;
             return;
         }
-        let Some(filter) = self.next_queue.pop_front() else {
+        let Some(action) = self.next_queue.pop_front() else {
             return;
         };
         let session = self.view.source_session.clone();
@@ -114,35 +118,68 @@ impl Dashboard {
                 _ => None,
             });
         let (session, pane_id) = self
-            .next_origin
-            .take()
-            .map(|(s, p)| (s, Some(p)))
+            .navigation_target
+            .as_ref()
+            .map(|target| (target.session.clone(), Some(target.pane_id)))
             .unwrap_or((session, pane_id));
-        let request = dashboard_core::NextRequest {
-            filter,
+        self.next_pending = true;
+        self.navigate(action, session, pane_id, "next");
+    }
+
+    fn navigate(
+        &self,
+        action: NavigationAction,
+        session: String,
+        pane_id: Option<u32>,
+        kind: &str,
+    ) {
+        let request = NavigationRequest {
+            action,
             session,
             pane_id,
         };
-        self.next_pending = true;
         self.host(
-            "next",
+            "navigate",
             Some(&serde_json::to_string(&request).unwrap()),
-            "next",
+            kind,
         );
     }
 
-    fn focus_agent(&mut self, agent: &Agent) {
-        if agent.identity.session_name == self.view.source_session {
-            focus_terminal_pane(agent.identity.pane_id, true, false);
-        } else {
-            switch_session_with_focus(
-                &agent.identity.session_name,
-                None,
-                Some((agent.identity.pane_id, false)),
-            );
+    fn navigate_dashboard(&mut self, action: NavigationAction) {
+        if self.dashboard_navigation_pending || self.view.source_session.is_empty() {
+            return;
         }
-        self.message = "Focused agent pane".into();
+        self.dashboard_navigation_pending = true;
+        self.message = "Checking target pane…".into();
+        self.navigate(
+            action,
+            self.view.source_session.clone(),
+            self.dashboard_origin,
+            "focus",
+        );
     }
+
+    fn focus_visit(&mut self, target: &PaneVisit) {
+        if target.session == self.view.source_session {
+            focus_terminal_pane(target.pane_id, true, false);
+        } else {
+            switch_session_with_focus(&target.session, None, Some((target.pane_id, false)));
+        }
+        self.message = "Focused terminal pane".into();
+    }
+
+    fn finish_navigation_step(&mut self) {
+        // A burst is resolved before switching sessions. The newly attached
+        // instance handles the next key after the switch.
+        if self.next_queue.is_empty() {
+            if let Some(target) = self.navigation_target.take() {
+                self.focus_visit(&target);
+            }
+        } else {
+            self.start_next();
+        }
+    }
+
     fn request_permissions(&self) {
         request_permission(&[
             PermissionType::RunCommands,
@@ -366,11 +403,17 @@ fi"#,
                 }
             }
             BareKey::Enter if self.permissions => {
-                if let Some(id) = self.view.selected_id.as_deref() {
-                    // Resolve a fresh process identity before focusing a recycled pane.
-                    self.host("resolve", Some(id), "focus");
-                    self.message = "Checking selected pane…".into();
+                let target = self.snapshot.as_ref().and_then(|snapshot| {
+                    snapshot.agents.iter().find(|agent| {
+                        Some(&agent.identity.agent_id) == self.view.selected_id.as_ref()
+                    })
+                });
+                if let Some(agent) = target {
+                    self.navigate_dashboard(NavigationAction::Select(agent.identity.clone()));
                 }
+            }
+            BareKey::Char('b') if self.permissions => {
+                self.navigate_dashboard(NavigationAction::Previous);
             }
             _ => {}
         }
@@ -423,6 +466,9 @@ impl ZellijPlugin for Dashboard {
             EventType::ListClients,
             EventType::PastedText,
         ]);
+        if !self.collector {
+            subscribe(&[EventType::PaneUpdate]);
+        }
         // The initial grant dialog must be selectable, including collectors.
         // Only suppress collector selection after the permission result arrives.
         set_selectable(true);
@@ -455,7 +501,7 @@ impl ZellijPlugin for Dashboard {
                         set_selectable(false);
                     }
                     self.refresh();
-                    self.start_next(None);
+                    self.start_next();
                     self.start_window();
                 }
             }
@@ -487,7 +533,7 @@ impl ZellijPlugin for Dashboard {
                 if let Some(session) = info.session_name {
                     self.view.source_session = session;
                 }
-                self.start_next(None);
+                self.start_next();
                 self.start_window();
                 return false;
             }
@@ -495,13 +541,29 @@ impl ZellijPlugin for Dashboard {
                 if let Some(session) = sessions.iter().find(|s| s.is_current_session) {
                     self.view.source_session = session.name.clone();
                 }
-                self.start_next(None);
+                self.start_next();
                 self.start_window();
                 return false;
             }
             Event::ListClients(clients) => {
                 self.window_clients(&clients);
                 self.navigation_clients(clients);
+                return false;
+            }
+            Event::PaneUpdate(manifest) if !self.collector => {
+                self.dashboard_origin = manifest.panes.values().find_map(|panes| {
+                    if !panes.iter().any(|pane| {
+                        pane.is_plugin && pane.is_floating && Some(pane.id) == self.plugin_id
+                    }) {
+                        return None;
+                    }
+                    panes
+                        .iter()
+                        .find(|pane| {
+                            pane.is_focused && !pane.is_plugin && !pane.is_floating && !pane.exited
+                        })
+                        .map(|pane| pane.id)
+                });
                 return false;
             }
             Event::Key(key) if !self.collector => self.key(key),
@@ -527,10 +589,14 @@ impl ZellijPlugin for Dashboard {
                 if kind == "output" {
                     self.output_pending = false;
                 }
+                if kind == "focus" {
+                    self.dashboard_navigation_pending = false;
+                }
                 if code != Some(0) {
                     if kind == "next" {
                         self.next_pending = false;
                         self.next_queue.clear();
+                        self.finish_navigation_step();
                     }
                     if matches!(kind, "action" | "action-status" | "history-result") {
                         self.action_pending = false;
@@ -554,24 +620,15 @@ impl ZellijPlugin for Dashboard {
                     }
                 } else if kind == "next" {
                     self.next_pending = false;
-                    match serde_json::from_slice::<Option<Agent>>(&stdout) {
-                        Ok(Some(agent)) => {
-                            // Finish a burst before switching sessions: detached
-                            // instances must not execute the remaining keys.
-                            if self.next_queue.is_empty() {
-                                self.focus_agent(&agent);
-                            }
-                            self.start_next(Some((
-                                agent.identity.session_name,
-                                agent.identity.pane_id,
-                            )));
-                        }
-                        Ok(None) => self.start_next(None),
+                    match serde_json::from_slice::<Option<PaneVisit>>(&stdout) {
+                        Ok(Some(target)) => self.navigation_target = Some(target),
+                        Ok(None) => (),
                         Err(e) => {
                             self.next_queue.clear();
                             self.message = format!("Invalid navigation response: {e}");
                         }
                     }
+                    self.finish_navigation_step();
                 } else if matches!(
                     kind,
                     "catalog"
@@ -631,16 +688,13 @@ impl ZellijPlugin for Dashboard {
                         }
                     }
                 } else if kind == "focus" {
-                    match serde_json::from_slice::<Agent>(&stdout) {
-                        Ok(agent) if context.get("agent_id") == Some(&agent.identity.agent_id) => {
-                            self.focus_agent(&agent);
-                            // Only the dashboard's resolved selection closes its pane.
-                            // Collector navigation must keep collecting after focus changes.
-                            if !self.collector {
-                                close_self();
-                            }
+                    match serde_json::from_slice::<Option<PaneVisit>>(&stdout) {
+                        Ok(Some(target)) => {
+                            self.focus_visit(&target);
+                            close_self();
                         }
-                        _ => self.message = "Selected agent changed; refresh the list".into(),
+                        Ok(None) => self.message = "No previous pane in navigation history".into(),
+                        Err(e) => self.message = format!("Invalid navigation response: {e}"),
                     }
                 }
                 if kind == "snapshot" && self.dirty {
@@ -665,7 +719,7 @@ impl ZellijPlugin for Dashboard {
                     self.start_window();
                 }
             }
-            "agent-next" if self.collector => {
+            "agent-next" | "agent-prev" if self.collector => {
                 self.next_messages += 1;
                 self.next_source = Some(format!(
                     "{:?}, private={}",
@@ -674,12 +728,18 @@ impl ZellijPlugin for Dashboard {
                 if !message.is_private {
                     return false;
                 }
-                match dashboard_core::NextFilter::parse(message.payload.as_deref().unwrap_or("")) {
-                    Ok(filter) => {
-                        if !self.next_queue.push_back(filter) {
+                let action = if message.name == "agent-prev" {
+                    Ok(NavigationAction::Previous)
+                } else {
+                    dashboard_core::NextFilter::parse(message.payload.as_deref().unwrap_or(""))
+                        .map(NavigationAction::Next)
+                };
+                match action {
+                    Ok(action) => {
+                        if !self.next_queue.push_back(action) {
                             self.message = "Navigation queue full; extra key ignored".into();
                         }
-                        self.start_next(None);
+                        self.start_next();
                     }
                     Err(error) => eprintln!("{error}"),
                 }

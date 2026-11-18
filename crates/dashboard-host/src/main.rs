@@ -5,6 +5,7 @@ mod hooks;
 mod host;
 mod instruction_queue;
 mod legacy_json;
+mod navigation;
 mod panes;
 mod process;
 mod repository;
@@ -115,6 +116,12 @@ fn run(
                 &executable,
                 &dir,
             )
+        }
+        "navigate" => {
+            let request =
+                serde_json::from_str(args.get(1).ok_or("navigate requires a JSON request")?)
+                    .map_err(|e| format!("invalid navigation request: {e}"))?;
+            json(&navigation::navigate(&dir, request, deps)?)
         }
         "next" => {
             let request = serde_json::from_str::<dashboard_core::NextRequest>(
